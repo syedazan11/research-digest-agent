@@ -26,5 +26,13 @@ embeddings:
   model: gemini-embedding-001
   dimensions: 768
 
+# Stage 3: an LLM scores the ranking.top_k hybrid candidates 1-10 and keeps the best top_n.
+rerank:
+  enabled: true
+  provider: groq            # groq | gemini  (key in .env: GROQ_API_KEY / GEMINI_API_KEY)
+  model: openai/gpt-oss-120b
+  top_n: 5
+  batch_size: 5
+
 database:
   path: data/digest.db
