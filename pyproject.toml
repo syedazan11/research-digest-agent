@@ -1,0 +1,9 @@
+[project]
+name = "research-digest-agent"
+version = "0.1.0"
+description = "Weekly arXiv digest agent: fetch, rank, summarize, deliver, learn from feedback."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

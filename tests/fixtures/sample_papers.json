@@ -1,0 +1,147 @@
+[
+  {
+    "id": "sample-001",
+    "title": "A Benchmark for Evaluating Faithfulness in Retrieval-Augmented Generation",
+    "abstract": "We introduce a benchmark that measures whether answers from retrieval-augmented generation systems are faithful to the retrieved documents. We compare automatic faithfulness metrics against human judgments and find that LLM-as-judge metrics correlate best.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-20T12:00:00+00:00",
+    "categories": [
+      "cs.CL",
+      "cs.IR"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-001"
+  },
+  {
+    "id": "sample-002",
+    "title": "Detecting Hallucinations in RAG Pipelines with Token-Level Uncertainty",
+    "abstract": "Hallucination detection for RAG systems remains difficult. We propose a token-level uncertainty signal that flags unsupported claims in generated answers and improves detection F1 over prior baselines on three QA datasets.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-19T12:00:00+00:00",
+    "categories": [
+      "cs.CL"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-002"
+  },
+  {
+    "id": "sample-003",
+    "title": "Measuring Retrieval Quality for Long-Context Question Answering",
+    "abstract": "We study how retrieval quality affects downstream answer accuracy in long-context question answering, and propose recall-oriented evaluation metrics for retrievers used in generation pipelines.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-18T12:00:00+00:00",
+    "categories": [
+      "cs.IR"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-003"
+  },
+  {
+    "id": "sample-004",
+    "title": "Grounded Answer Generation: Do Citations Help Users Trust Model Outputs?",
+    "abstract": "We run a user study on citation-backed answers from language models that ground their outputs in retrieved evidence, analysing when users verify sources and when grounding errors go unnoticed.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-17T12:00:00+00:00",
+    "categories": [
+      "cs.HC",
+      "cs.CL"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-004"
+  },
+  {
+    "id": "sample-005",
+    "title": "Protein Structure Prediction with Equivariant Graph Networks",
+    "abstract": "We present an equivariant graph neural network for protein structure prediction that improves accuracy on held-out families while reducing training compute.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-16T12:00:00+00:00",
+    "categories": [
+      "q-bio.BM",
+      "cs.LG"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-005"
+  },
+  {
+    "id": "sample-006",
+    "title": "Sample-Efficient Reinforcement Learning for Quadruped Locomotion",
+    "abstract": "We train quadruped robots to walk on rough terrain with a model-based reinforcement learning method that needs ten times fewer environment steps than model-free baselines.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-15T12:00:00+00:00",
+    "categories": [
+      "cs.RO",
+      "cs.LG"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-006"
+  },
+  {
+    "id": "sample-007",
+    "title": "Efficient Attention Kernels for Large Vision Transformers",
+    "abstract": "We design memory-efficient attention kernels for vision transformers that speed up training on high-resolution images without accuracy loss.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-14T12:00:00+00:00",
+    "categories": [
+      "cs.CV"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-007"
+  },
+  {
+    "id": "sample-008",
+    "title": "Federated Learning Under Label Noise",
+    "abstract": "We analyse federated learning when client labels are noisy and propose a robust aggregation rule with convergence guarantees.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-20T12:00:00+00:00",
+    "categories": [
+      "cs.LG"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-008"
+  },
+  {
+    "id": "sample-009",
+    "title": "Curriculum Prompting for Mathematical Reasoning",
+    "abstract": "We show that ordering few-shot examples from easy to hard improves chain-of-thought accuracy of language models on math word problems.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-19T12:00:00+00:00",
+    "categories": [
+      "cs.CL"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-009"
+  },
+  {
+    "id": "sample-010",
+    "title": "Speech Recognition for Low-Resource Languages with Self-Supervised Pretraining",
+    "abstract": "We pretrain speech encoders on unlabelled audio from low-resource languages and fine-tune them for recognition, cutting word error rate substantially.",
+    "authors": [
+      "Synthetic Author"
+    ],
+    "published": "2026-11-18T12:00:00+00:00",
+    "categories": [
+      "cs.CL",
+      "eess.AS"
+    ],
+    "pdf_url": "",
+    "url": "https://example.org/sample-010"
+  }
+]

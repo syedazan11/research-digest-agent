@@ -1,0 +1,19 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# local run output (the DB gets un-ignored on Day 5, when GitHub Actions commits it)
+data/*.db
+data/candidates/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

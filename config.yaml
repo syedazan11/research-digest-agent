@@ -1,0 +1,30 @@
+topic:
+  name: "LLM evaluation"
+  description: >
+    How to evaluate large language models and LLM applications: benchmarks,
+    LLM-as-a-judge, evaluation metrics, and measuring reliability and safety.
+  keywords:
+    - LLM evaluation
+    - LLM-as-a-judge
+    - evaluating large language models
+    - evaluation benchmark
+    - judge model
+  categories: [cs.CL, cs.AI, cs.LG]
+
+fetch:
+  days_back: 7
+  max_results: 200
+
+ranking:
+  top_k: 20
+  weights:
+    bm25: 0.4
+    embedding: 0.6
+
+embeddings:
+  provider: none
+  model: gemini-embedding-001
+  dimensions: 768
+
+database:
+  path: data/digest.db
