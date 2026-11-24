@@ -106,7 +106,7 @@ Edit `config.yaml`:
    python -m digest.run --include-seen
    ```
    The log line `Gemini embedding API calls this run` should say **0**: every paper and the query come from the cache.
-5. Open `data/candidates/<today>.json`. This file is what Day 3 (reranking) will read.
+5. Open `data/candidates/<today>.json`. This file is what Day 2 (reranking) builds on.
 
 ### Step 6: Look inside the database (≈10 min)
 
@@ -154,11 +154,102 @@ Try answering these out loud without looking:
 
 ---
 
+## Day 2: LLM Reranking
+
+**Goal:** an LLM reads the hybrid top 20, scores each paper 1–10 for how useful it is (with a one-line reason), and keeps the best 5. If the LLM is down, the run still finishes with the hybrid top 5.
+
+### What's new
+
+```
+digest/
+├── llm.py       ← swappable LLM providers: GroqLLM, GeminiLLM, make_llm()
+└── rerank.py    ← batching, prompt, Pydantic validation, retry, fallback
+config.yaml      ← new rerank: section
+data/digest.db   ← new rankings table (one row per candidate per run)
+```
+
+### Step 1: Groq key (≈5 min)
+
+1. Get a free key at https://console.groq.com/keys.
+2. Add it to `.env` (see `.env.example`): `GROQ_API_KEY=...`
+3. `pip install -r requirements.txt` (adds `groq` and `pydantic`).
+
+### Step 2: Tests (≈2 min)
+
+```bash
+python -m pytest
+```
+All offline. The LLM tests use a `FakeLLM` with scripted replies (good JSON, garbage, exceptions), so they cost nothing and give the same result every time.
+
+### Step 3: Offline run
+
+```bash
+python -m digest.run --sample tests/fixtures/sample_papers.json --no-embeddings --dry-run --no-rerank
+```
+You'll see the hybrid top 10, then a `Rerank (rerank off)` table. Drop `--no-rerank` to send the 10 sample papers to Groq (2 calls).
+
+### Step 4: Real run (≈5 min)
+
+Save the Day 1 output first (`data/candidates/<date>.json` → copy it somewhere), then:
+
+```bash
+python -m digest.run --include-seen
+```
+
+The rerank table looks like this (illustrative; `*` = selected for the digest):
+
+```
+ hybrid -> final  llm   title
+* #7   ->   1    9.0  Judge Models ...
+                       Directly studies LLM-as-a-judge reliability.
+  #2   ->   -    4.0  Clinical Agents ...
+```
+
+Compare with Day 1: which papers moved, and do the reasons convince you?
+
+### Step 5: Look in the database
+
+`rankings` has one row per candidate per run: `hybrid_rank`, `hybrid_score`, `llm_score`, `reason`, `final_rank`, `selected`. Once you have 👍/👎 feedback (Day 4+), this is what you compute **Precision@5** from: hybrid top 5 vs LLM top 5.
+
+### Day 2 checklist
+
+- [ ] `python -m pytest` passes
+- [ ] Real run shows the rerank table with LLM scores and reasons
+- [ ] `--no-rerank` and a missing `GROQ_API_KEY` both still finish with a hybrid top 5
+- [ ] `rankings` table has rows for the run
+- [ ] Compared Day 1 vs Day 2 top 5 and noted one example for the README
+- [ ] Committed and pushed
+
+### Understand it (interviewers will ask)
+
+1. **Why rerank with an LLM at all?** BM25 and embeddings measure *similarity* to the topic text. An LLM can judge *usefulness*: a clinical-agents paper can mention "evaluation" a lot and still not be about evaluating LLMs.
+2. **Why only the top 20, and why batches of 5?** Cost and latency: cheap retrieval narrows 200 → 20, the expensive model only sees 20. Batches of 5 keep the prompt short (the model compares papers side by side but doesn't lose track), and one bad batch only affects 5 papers.
+3. **Why P1..P5 labels instead of arXiv ids?** Short, can't be mistyped into another real id, trivial to map back. Unknown ids in the reply are simply ignored.
+4. **Why Pydantic?** The LLM's output is untrusted input. Pydantic checks the shape and the 1–10 range in one line, and its error message is exactly what we send back on the retry.
+5. **What stops prompt injection?** Abstracts are third-party text. They go inside `<paper>` tags with `<`/`>` escaped (so an abstract can't close its tag), the system prompt says never to follow instructions inside papers, and the output is a fixed schema — the worst an injected abstract can do is lie about its own score.
+6. **What happens to papers the LLM skips?** They go after all scored papers, in hybrid order. An unchecked paper shouldn't outrank one the LLM actually judged.
+7. **Ties?** Broken by hybrid score — the cheaper signal is still information.
+8. **What if Groq is down?** 429 → wait for `retry-after` and retry. Bad key → stop immediately (retrying can't fix it). Anything else → retry the batch once, then skip it. If no batch succeeds, the run uses the hybrid top 5 and says so in the log and the `runs.notes` column.
+9. **What if a retriever fails?** `HybridRanker` logs a warning, skips it, and renormalizes the weights over the retrievers that worked. `runs.retrievers` records which ones actually ran.
+10. **Why temperature 0?** Ranking should be repeatable: same papers, same scores, so runs are comparable.
+11. **How do you switch to Gemini?** `rerank.provider: gemini` and a model name in `config.yaml`. Both providers implement the same one-method `LLMClient` protocol.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `GROQ_API_KEY not set: LLM reranking disabled` | Add the key to `.env` in the project folder. |
+| `Groq rejected the API key (401)` | Key typo or revoked. Make a new one. The run still finishes with the hybrid top 5. |
+| `Groq 429 rate limit, waiting Ns` | Free-tier limit. It waits and retries automatically. |
+| `Batch N/M failed after retry` | The model returned invalid JSON twice. Those 5 papers keep hybrid order. |
+| `LLM reranking failed completely` | Every batch failed. Check the warnings above it. |
+
+---
+
 ## Coming next
 
 | Day | Build |
 |---|---|
-| 2 | Gemini Flash reranking: score top 20 from 1–10 with a reason (Pydantic-validated JSON) → top 5 |
 | 3 | Download top 5 PDFs, extract sections with PyMuPDF, summarize each |
 | 4 | Telegram bot: send the digest with 👍/👎 buttons |
 | 5 | GitHub Actions: weekly digest run + feedback poller every few hours, commit the DB back |
