@@ -33,6 +33,7 @@ def setup(tmp_path, monkeypatch):
     cfg.write_text(CONFIG, encoding="utf-8")
     monkeypatch.setattr(run, "load_dotenv", lambda *a, **k: None)  # never load the real .env
     monkeypatch.setattr(run, "PdfFetcher", OfflineFetcher)  # never download a real PDF
+    monkeypatch.setattr(run, "make_github", lambda: None)  # never post to a real repo
     return cfg
 
 
@@ -207,3 +208,63 @@ def test_dry_run_writes_no_digest(setup, monkeypatch):
     monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
     assert run.main(args(setup, "--dry-run")) == 0
     assert not (setup.parent / "data").exists()
+
+
+# --- Day 4: GitHub delivery ---
+def test_run_delivers_digest_to_github(setup, monkeypatch, caplog):
+    from fake_github import FakeGitHub
+
+    gh = FakeGitHub()
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({"Grounded": 10})))
+    monkeypatch.setattr(run, "make_github", lambda: gh.client())
+    with caplog.at_level("INFO"):
+        assert run.main(args(setup)) == 0
+
+    assert len(gh.issues) == 1 and gh.issues[1]["title"].endswith("(run 1)")
+    comments = gh.comments_on(1)
+    assert len(comments) == 3 and comments[0]["body"].startswith("## 1. Grounded Answer Generation")
+    assert "Delivered run 1 to issue #1: 3 comments posted" in caplog.text
+    assert "deliver" in caplog.text.split("Timing:")[1]
+
+    # the .md digest and the issue comment are rendered by the same code
+    [digest_file] = (setup.parent / "data" / "digests").glob("*.md")
+    first_paper_md = digest_file.read_text(encoding="utf-8").split("---\n\n")[1].strip()
+    assert comments[0]["body"].startswith(first_paper_md)
+
+
+def test_no_deliver_flag(setup, monkeypatch, caplog):
+    def boom():
+        raise AssertionError("make_github must not be called with --no-deliver")
+
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    monkeypatch.setattr(run, "make_github", boom)
+    with caplog.at_level("INFO"):
+        assert run.main(args(setup, "--no-deliver")) == 0
+    assert "Delivery off (--no-deliver)" in caplog.text
+
+
+def test_dry_run_previews_issue_without_calling_github(setup, monkeypatch, capsys):
+    def boom():
+        raise AssertionError("--dry-run must not call GitHub")
+
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    monkeypatch.setattr(run, "make_github", boom)
+    assert run.main(args(setup, "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "GitHub issue preview (dry run: nothing posted)" in out
+    assert "ISSUE  Research digest: RAG evaluation" in out and out.count("--- comment ") == 3
+    assert not (setup.parent / "data").exists()  # still writes nothing
+
+
+def test_github_failure_never_fails_the_run(setup, monkeypatch, caplog):
+    import httpx
+    from fake_github import FakeGitHub
+
+    gh = FakeGitHub()
+    gh.before = lambda req: httpx.Response(401, json={"message": "Bad credentials"})
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    monkeypatch.setattr(run, "make_github", lambda: gh.client())
+    with caplog.at_level("ERROR"):
+        assert run.main(args(setup)) == 0
+    assert "GITHUB_TOKEN is invalid or expired" in caplog.text
+    assert len(list((setup.parent / "data" / "digests").glob("*.md"))) == 1  # digest still saved

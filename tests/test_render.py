@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from digest.models import Paper
 from digest.render import md, render_digest
 from digest.rerank import RerankedPaper
@@ -48,6 +50,31 @@ def test_untrusted_text_cannot_inject_markdown():
     assert "![x](" not in out and "[click](" not in out
     assert r"\!\[x\](https://evil.example/t.png)" in out
     assert r"- **Method:** \# Heading new line" in out
+
+
+WJ = "⁠"
+
+
+@pytest.mark.parametrize("raw, safe", [
+    ("thanks @octocat", f"thanks @{WJ}octocat"),
+    ("cc @org/team", f"cc @{WJ}org/team"),
+    ("see #123", f"see \\#{WJ}123"),
+    ("fixed in octocat/Hello-World#45", f"fixed in octocat/Hello-World\\#{WJ}45"),
+    ("GH-7 and gh-8", f"GH-{WJ}7 and gh-{WJ}8"),
+    ("a@b.com, C# code, #hashtag, 50 @ 3", "a@b.com, C\\# code, \\#hashtag, 50 @ 3"),  # left alone
+])
+def test_mentions_and_issue_refs_are_defanged(raw, safe):
+    # Verified against GitHub's POST /markdown renderer on 2026-11-25: a backslash does NOT stop
+    # GitHub from linking @user / #1 / owner/repo#1 / GH-1; a U+2060 word joiner after @ or # does.
+    assert md(raw) == safe
+
+
+def test_defang_applies_to_titles_authors_and_llm_text():
+    evil = Summary(problem="ping @octocat", method="see #1", key_result="K.", why_it_matters="W.",
+                   limitations="L.")
+    out = render(entry(title="Fixes #42 for @someone", summary=evil))
+    assert "@octocat" not in out and "#1" not in out and "#42" not in out and "@someone" not in out
+    assert f"@{WJ}octocat" in out and f"@{WJ}someone" in out
 
 
 def test_md_escape():

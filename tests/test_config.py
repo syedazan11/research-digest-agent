@@ -55,3 +55,17 @@ def test_summarize_section(tmp_path):
 def test_summarize_rejects_bad_values(tmp_path, extra):
     with pytest.raises(ValueError):
         load_config(write(tmp_path, extra))
+
+
+def test_deliver_section(tmp_path):
+    d = load_config(ROOT / "config.yaml").deliver
+    assert (d.provider, d.close_previous, d.comment_delay_seconds, d.feedback_days, d.feedback_users) == (
+        "github", True, 1.0, 30, [])
+    d = load_config(write(tmp_path, "deliver:\n  provider: None\n  feedback_users: [me]\n")).deliver
+    assert d.provider == "none" and d.feedback_users == ["me"]
+
+
+@pytest.mark.parametrize("extra", ["deliver:\n  provider: telegram\n", "deliver:\n  comment_delay_seconds: 0\n"])
+def test_deliver_rejects_bad_values(tmp_path, extra):
+    with pytest.raises(ValueError):
+        load_config(write(tmp_path, extra))

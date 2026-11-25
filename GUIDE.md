@@ -248,7 +248,7 @@ Compare with Day 1: which papers moved, and do the reasons convince you?
 
 ## Day 3: PDFs → Summaries → Markdown Digest
 
-**Goal:** the top 5 papers each get a five-part summary (problem, method, key result, why it matters, limitations) built from the actual paper, and the run writes a clean Markdown digest that Days 4 (Telegram) and 7 (GitHub Pages) reuse.
+**Goal:** the top 5 papers each get a five-part summary (problem, method, key result, why it matters, limitations) built from the actual paper, and the run writes a clean Markdown digest that Days 4 (GitHub Issues) and 7 (GitHub Pages) reuse.
 
 ### What's new
 
@@ -328,7 +328,7 @@ Now: `summarize 0` calls, `PDF downloads this run: 0`, and the summarize stage t
 10. **How do you stop the model inventing limitations?** The prompt says to use only the provided text and to write "Not stated in the provided text." when there are none. Pydantic also caps each field at 500 characters, so a rambling reply is retried.
 11. **What stops a malicious PDF?** Same guard as rerank, from shared code (`prompting.py`): the text is escaped inside a `<paper>` tag, the system prompt says never to follow instructions in it, and the output is a fixed schema. In the Markdown, every paper/LLM string is escaped, so injected text can't become a link or an image.
 12. **Why one LLM client for rerank and summarize?** One key, one config line, and one call counter, so the log can say `17 (rerank 6, summarize 11)`.
-13. **Why Markdown?** One format both later stages can use: Telegram renders it, GitHub Pages publishes it.
+13. **Why Markdown?** One format both later stages can use: GitHub Issues render it, GitHub Pages publishes it.
 
 ### Troubleshooting
 
@@ -341,11 +341,96 @@ Now: `summarize 0` calls, `PDF downloads this run: 0`, and the summarize stage t
 
 ---
 
+## Day 4: Deliver as a GitHub Issue → 👍/👎 Feedback
+
+**Goal:** each run opens one GitHub issue in this repo, posts one comment per paper, and your 👍/👎 reactions on those comments flow back into the `feedback` table. (Originally planned as a Telegram bot; Telegram is blocked in Pakistan, and GitHub Issues needs no bot server at all.)
+
+### What's new
+
+```
+digest/
+├── github.py     ← small GitHub REST client: rate limits, clear token errors
+├── deliver.py    ← issue + comments, resumable; also `python -m digest.deliver`
+└── feedback.py   ← `python -m digest.feedback`: reactions -> feedback table
+config.yaml       ← new deliver: section
+data/digest.db    ← new digest_issues + deliveries tables; feedback table migrated
+```
+
+### Step 1: Token (≈5 min)
+
+1. GitHub → Settings → Developer settings → **Fine-grained tokens** → Generate new token.
+2. Repository access: **Only select repositories** → this repo.
+3. Permissions → Repository → **Issues: Read and write** (Metadata: read is added automatically).
+4. Add to `.env` (see `.env.example`):
+   ```
+   GITHUB_TOKEN=github_pat_...
+   GITHUB_REPO=your-username/research-digest-agent
+   ```
+
+### Step 2: Tests, then a preview
+
+```bash
+python -m pytest
+python -m digest.deliver --dry-run
+```
+The tests run the real GitHub client against an in-memory fake GitHub (`tests/fake_github.py`). `--dry-run` prints the issue and every comment for the newest undelivered run, and calls nothing.
+
+### Step 3: Deliver for real
+
+```bash
+python -m digest.deliver          # post the newest undelivered run
+python -m digest.run              # or: the full pipeline, which delivers at the end
+```
+Open the repo's **Issues** tab: one issue labelled `digest`, five comments. Run `python -m digest.deliver` again: it says `0 comments posted, 5 already there`.
+
+### Step 4: Feedback
+
+React 👍 or 👎 on a few paper comments (from your own account), then:
+```bash
+python -m digest.feedback
+```
+→ `Feedback: 5 comments checked, 2 added, ...`. Take a reaction back and run it again: that row is removed. Check the `feedback` table in SQLite Viewer.
+
+### Day 4 checklist
+
+- [ ] `python -m pytest` passes
+- [ ] `--dry-run` preview looks right
+- [ ] A real digest issue with 5 comments in the repo
+- [ ] Re-running `python -m digest.deliver` posts nothing new
+- [ ] Your 👍/👎 show up in `feedback` after `python -m digest.feedback`
+- [ ] `.env` still not committed; committed and pushed
+
+### Understand it (interviewers will ask)
+
+1. **Why GitHub Issues instead of Telegram/email?** Free, no bot server, works in Pakistan, notifications by email and the mobile app, and reactions are a built-in 👍/👎 UI with an API. The digest also lives next to the code, which is nice for a portfolio.
+2. **How is delivery idempotent?** Two layers. The DB records the issue the moment it's created and each comment the moment it's posted, so a re-run skips them. But a crash can land after GitHub saved a post and before the DB write. So every issue and comment carries a hidden marker (`<!-- digest:run=4 paper=... -->`), and a resume first lists the issue's comments and adopts any it finds. The DB is the fast path; GitHub is the source of truth.
+3. **Why rebuild the digest from the DB to deliver it?** So any run can be delivered or resumed later (`python -m digest.deliver --run 4`) without re-fetching or re-paying for LLM calls. The `.md` file uses the same DB-backed renderer, so the file and the issue can't drift apart.
+4. **Why escape `@` and `#`?** Paper and LLM text is untrusted. `@someone` in an abstract would ping a real person; `#12` would link a random issue. I checked GitHub's own renderer (`POST /markdown`): a backslash does **not** stop the autolinker. An invisible word joiner (U+2060) after the `@`/`#` does, and the text still reads the same.
+5. **Why only the owner's reactions?** The repo is public. Anyone could react, and strangers shouldn't steer the ranking.
+6. **"Latest state wins"?** The feedback table mirrors GitHub: newest 👍/👎 counts, a removed reaction deletes the row. Polling twice changes nothing. A paper whose comment was deleted keeps its old rating (we can't see GitHub's state, so we don't guess).
+7. **Rate limits?** Primary limit: wait until `x-ratelimit-reset`. Secondary limit: wait for `retry-after`, or 60s if absent (GitHub's guidance). Waits are capped; past the cap it stops with a clear error and a resume command, instead of hanging a CI job for an hour. Comments are posted ~1s apart, which GitHub asks for on content-creating requests.
+8. **What if the token is bad?** 401/403 become a `GitHubAuthError` with a fix-it message ("needs Issues: Read and write"). The pipeline logs it and still exits 0 with the `.md` digest saved; the standalone `deliver`/`feedback` commands exit 1 so CI shows the failure. The token never appears in logs.
+9. **Why a fine-grained token?** Least privilege: one repo, one permission. If it leaks, the damage is "someone can edit issues on this repo".
+10. **Why `httpx.MockTransport` instead of mocking the client?** The tests run the real request loop, headers, pagination and rate-limit code against a fake server. Mocking the client would test the mock.
+11. **Why does `--dry-run` save the run to the DB?** It saves to the in-memory copy. The preview is then built by exactly the code a real delivery uses, and nothing touches disk.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `GITHUB_TOKEN not set: skipping GitHub delivery` | Add `GITHUB_TOKEN` and `GITHUB_REPO` to `.env`. |
+| `GITHUB_TOKEN is invalid or expired (401)` | Token expired (fine-grained tokens have an expiry). Make a new one. |
+| `lacks permission ... needs Issues: Read and write` | Edit the token's permissions, or it was made for another repo. |
+| `Repo ... not found, or GITHUB_TOKEN can't access it` | Check `GITHUB_REPO=owner/name` and the token's repository access. |
+| `GitHub delivery stopped ... Resume with: python -m digest.deliver --run N` | Rate limit or outage. Run that command later; nothing is posted twice. |
+| Reactions not counted | Only the repo owner's count. Add others to `deliver.feedback_users`. |
+
+---
+
 ## Coming next
 
 | Day | Build |
 |---|---|
-| 4 | Telegram bot: send the digest with 👍/👎 buttons |
-| 5 | GitHub Actions: weekly digest run + feedback poller every few hours, commit the DB back |
+| 5 | GitHub Actions: weekly `digest.run` + `digest.feedback` every few hours, commit the DB back |
 | 6 | Feedback learning: boost papers similar to your 👍 ones |
 | 7 | GitHub Pages archive, README results, demo video |

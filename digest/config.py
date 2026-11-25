@@ -59,6 +59,18 @@ class SummarizeConfig:
     pdf_delay_seconds: float = 3.0  # arXiv asks for at most 1 request every 3 seconds
 
 
+DELIVER_PROVIDERS = {"github", "none"}
+
+
+@dataclass
+class DeliverConfig:
+    provider: str = "github"  # "github" or "none"
+    close_previous: bool = True  # close last run's digest issue once the new one is posted
+    comment_delay_seconds: float = 1.0  # GitHub: ~1s between content-creating requests
+    feedback_days: int = 30  # how far back `python -m digest.feedback` reads reactions
+    feedback_users: list[str] = field(default_factory=list)  # whose reactions count; empty = repo owner
+
+
 @dataclass
 class Config:
     topic: TopicConfig
@@ -68,6 +80,7 @@ class Config:
     db_path: Path
     rerank: RerankConfig = field(default_factory=RerankConfig)
     summarize: SummarizeConfig = field(default_factory=SummarizeConfig)
+    deliver: DeliverConfig = field(default_factory=DeliverConfig)
 
 
 def load_config(path: str | Path) -> Config:
@@ -93,6 +106,7 @@ def load_config(path: str | Path) -> Config:
     d = raw.get("database") or {}
     rr = raw.get("rerank") or {}
     sm = raw.get("summarize") or {}
+    dl = raw.get("deliver") or {}
 
     embeddings = EmbeddingConfig(
         provider=str(e.get("provider", "gemini")).lower(),
@@ -124,6 +138,18 @@ def load_config(path: str | Path) -> Config:
     if summarize.pdf_delay_seconds < 3.0:
         raise ValueError("config: summarize.pdf_delay_seconds must be >= 3 (arXiv's rate limit)")
 
+    deliver = DeliverConfig(
+        provider=str(dl.get("provider", "github")).lower(),
+        close_previous=bool(dl.get("close_previous", True)),
+        comment_delay_seconds=float(dl.get("comment_delay_seconds", 1.0)),
+        feedback_days=int(dl.get("feedback_days", 30)),
+        feedback_users=[str(u) for u in dl.get("feedback_users") or []],
+    )
+    if deliver.provider not in DELIVER_PROVIDERS:
+        raise ValueError(f"config: unknown deliver.provider '{deliver.provider}' (use {sorted(DELIVER_PROVIDERS)})")
+    if deliver.comment_delay_seconds < 1.0:
+        raise ValueError("config: deliver.comment_delay_seconds must be >= 1 (GitHub's secondary rate limit)")
+
     return Config(
         topic=topic,
         fetch=FetchConfig(
@@ -140,4 +166,5 @@ def load_config(path: str | Path) -> Config:
         db_path=(path.parent / d.get("path", "data/digest.db")).resolve(),
         rerank=rerank,
         summarize=summarize,
+        deliver=deliver,
     )

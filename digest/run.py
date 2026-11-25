@@ -1,10 +1,12 @@
-"""Pipeline: fetch -> dedup -> hybrid ranking (top K) -> LLM rerank (top N) -> summaries -> digest.
+"""Pipeline: fetch -> dedup -> hybrid ranking (top K) -> LLM rerank (top N) -> summaries -> digest
+-> GitHub issue.
 
 Usage (from the project folder):
     python -m digest.run                      # real run: arXiv + ranking + rerank + summaries
     python -m digest.run --no-embeddings      # BM25 only for the hybrid stage
     python -m digest.run --no-rerank          # skip the LLM rerank, keep the hybrid top N
     python -m digest.run --no-summarize       # skip PDFs and summaries (digest shows abstracts)
+    python -m digest.run --no-deliver         # don't post the digest to GitHub
     python -m digest.run --sample tests/fixtures/sample_papers.json --dry-run   # offline test
 """
 
@@ -24,7 +26,9 @@ from dotenv import load_dotenv
 
 from digest.config import Config, load_config
 from digest.db import Database
+from digest.deliver import build_content, deliver_run, load_entries, log_result, preview
 from digest.fetch import fetch_recent, load_sample
+from digest.github import make_github
 from digest.llm import make_llm
 from digest.pdf import PdfFetcher
 from digest.render import render_digest
@@ -189,8 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-embeddings", action="store_true", help="BM25 only, no Gemini calls")
     ap.add_argument("--no-rerank", action="store_true", help="skip LLM reranking, keep the hybrid top N")
     ap.add_argument("--no-summarize", action="store_true", help="skip PDF download and summaries")
+    ap.add_argument("--no-deliver", action="store_true", help="don't post the digest to GitHub")
     ap.add_argument("--include-seen", action="store_true", help="rank papers even if seen in an earlier run")
-    ap.add_argument("--dry-run", action="store_true", help="write nothing: no DB changes, no output files")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="write nothing: no DB changes, no output files; print the GitHub issue instead of posting")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -265,36 +271,59 @@ def main(argv: list[str] | None = None) -> int:
             log.info("LLM calls this run: %d (rerank %d, summarize %d)",
                      llm.calls, rerank_calls, llm.calls - rerank_calls)
 
-        # 6. output (saved before printing, so a console problem can never lose a paid-for run)
+        # 6. record the run. On --dry-run this goes to the throwaway in-memory DB, so the digest
+        #    and the GitHub preview below are built by exactly the code a real run uses.
+        notes = result.note + (f"; {summaries_note(summaries)}" if summarize_on and summaries else "")
+        db.save_papers(new)
+        run_id = db.log_run(len(papers), len(new), len(ranked), ranker.active, notes=notes)
+        db.save_rankings(run_id, (
+            {
+                "paper_id": it.ranked.paper.id,
+                "hybrid_rank": it.hybrid_rank,
+                "hybrid_score": it.ranked.score,
+                "llm_score": it.llm_score,
+                "reason": it.reason,
+                "final_rank": it.final_rank,
+            }
+            for it in result.items
+        ))
+
+        # 7. files (saved before printing, so a console problem can never lose a paid-for run)
         if args.dry_run:
             log.info("Dry run: nothing written (no database changes, no candidates or digest file)")
         else:
-            notes = result.note + (f"; {summaries_note(summaries)}" if summarize_on and summaries else "")
-            db.save_papers(new)
-            run_id = db.log_run(len(papers), len(new), len(ranked), ranker.active, notes=notes)
-            db.save_rankings(run_id, (
-                {
-                    "paper_id": it.ranked.paper.id,
-                    "hybrid_rank": it.hybrid_rank,
-                    "hybrid_score": it.ranked.score,
-                    "llm_score": it.llm_score,
-                    "reason": it.reason,
-                    "final_rank": it.final_rank,
-                }
-                for it in result.items
-            ))
             log.info("Run #%d logged. Papers in DB: %d", run_id, db.count_papers())
             if result.items:
                 out = save_candidates(result, cfg.db_path.parent / "candidates", run_id)
                 log.info("Saved candidates to %s", out)
             if result.top:
                 ranked_by = f"{llm.name}/{llm.model}" if result.used_llm and llm is not None else "hybrid score"
-                text = render_digest(list(zip(result.top, summaries)), cfg.topic.name, run_id,
+                text = render_digest(load_entries(db, cfg, run_id), cfg.topic.name, run_id,
                                      datetime.now(timezone.utc).date(), ranked_by)
                 out = save_digest(text, cfg.db_path.parent / "digests", run_id)
                 log.info("Saved digest to %s", out)
 
+        # 8. deliver to GitHub (a failure is logged with a resume command; the digest file is already saved)
+        deliver_on = cfg.deliver.provider == "github" and not args.no_deliver and bool(result.top)
+        delivery_preview = ""
+        if deliver_on and args.dry_run:
+            delivery_preview = preview(build_content(db, cfg, run_id))
+        elif deliver_on:
+            with timer("deliver"):
+                gh = make_github()
+                if gh is not None:
+                    try:
+                        delivery = deliver_run(db, cfg, run_id, gh)
+                    finally:
+                        gh.close()
+                    log_result(delivery)
+        elif result.top:
+            log.info("Delivery off (%s)", "--no-deliver" if args.no_deliver else f"provider: {cfg.deliver.provider}")
+
         log.info("Timing: %s", timer.line())
+        if delivery_preview:
+            print("\nGitHub issue preview (dry run: nothing posted)")
+            print(delivery_preview)
         print_rerank(result)
         print_summaries(summaries)
 
