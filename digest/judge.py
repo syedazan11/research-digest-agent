@@ -5,7 +5,7 @@
 - Length rules are checked by code, not by an LLM: each field must be 1-2 sentences, <= 500 chars.
 - Faithfulness is checked by an LLM judge, field by field, against the exact source text the
   summarizer saw (same extraction, same token budget). The judge is a *different* model
-  (Llama 3.3 70B) from the summarizer (gpt-oss-120b), because models tend to rate their own
+  (Qwen3.8 27B, another model family) from the summarizer (gpt-oss-120b), because models tend to rate their own
   output kindly. It's still an automated judge: spot-check its verdicts by hand.
 
 The report is printed and saved to data/evals/<date>-summaries.md.
@@ -31,7 +31,7 @@ from digest.summarize import FIELDS, MAX_FIELD_CHARS, Summary
 
 log = logging.getLogger(__name__)
 
-JUDGE_MODEL = "llama-3.3-70b-versatile"
+JUDGE_MODEL = "qwen/qwen3.8-27b"  # a different model family from the gpt-oss summarizer, on the same Groq key
 _ABBREV = re.compile(r"\b(e\.g|i\.e|et al|vs|etc|Fig|Eq|Sec|approx|cf)\.", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?](?=\s+[A-Z0-9(\"'])")
 
@@ -183,6 +183,8 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None, fetche
         return 1
     own_fetcher = fetcher is None
     fetcher = fetcher or PdfFetcher(delay_seconds=cfg.summarize.pdf_delay_seconds)
+    if hasattr(llm, "max_retries"):
+        llm.max_retries = 6  # judge prompts are ~3K tokens; free-tier per-minute limits need patience
 
     results: list[Judged] = []
     try:
@@ -199,6 +201,9 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None, fetche
                       else abstract_only(paper, row["fallback_reason"] or ""))
                 log.info("Judging %s (%s)", paper.id, pt.source)
                 results.append(judge_one(llm, paper, pt.text, row["source"], summary))
+                if len(results) == 1 and results[0].error:  # e.g. unknown model: don't repeat it 5 more times
+                    log.error("The judge failed on the first summary (%s); stopping", results[0].error)
+                    return 1
     except LLMAuthError as e:
         log.error("%s", e)
         return 1
