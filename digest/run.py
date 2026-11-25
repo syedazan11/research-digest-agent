@@ -7,6 +7,7 @@ Usage (from the project folder):
     python -m digest.run --no-rerank          # skip the LLM rerank, keep the hybrid top N
     python -m digest.run --no-summarize       # skip PDFs and summaries (digest shows abstracts)
     python -m digest.run --no-deliver         # don't post the digest to GitHub
+    python -m digest.run --strict             # exit 1 if any stage fell back (used in GitHub Actions)
     python -m digest.run --sample tests/fixtures/sample_papers.json --dry-run   # offline test
 """
 
@@ -197,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--include-seen", action="store_true", help="rank papers even if seen in an earlier run")
     ap.add_argument("--dry-run", action="store_true",
                     help="write nothing: no DB changes, no output files; print the GitHub issue instead of posting")
+    ap.add_argument("--strict", action="store_true",
+                    help="exit 1 if any stage fell back (LLM, GitHub); for CI, so failures get noticed")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -257,6 +260,9 @@ def main(argv: list[str] | None = None) -> int:
             result = run_rerank(cfg, ranked, llm, enabled=rerank_on)
         rerank_calls = llm.calls if llm is not None else 0
         log.info(result.note)
+        problems: list[str] = []  # stages that fell back; --strict turns these into exit code 1
+        if rerank_on and result.items and not result.used_llm:
+            problems.append(f"LLM rerank fell back to hybrid order ({result.note})")
 
         # 5. summarize the selected papers (falls back to the abstract on any failure)
         summaries: list[PaperSummary] = []
@@ -264,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
             with timer("summarize"):
                 summaries = run_summarize(cfg, db, result.top, llm)
             log.info(summaries_note(summaries))
+            if all(s.summary is None for s in summaries):
+                problems.append("no paper got a summary")
         elif result.top:
             log.info("Summaries off: the digest shows abstracts")
             summaries = [PaperSummary(it.ranked.paper, None, "abstract", error="summaries off") for it in result.top]
@@ -311,12 +319,16 @@ def main(argv: list[str] | None = None) -> int:
         elif deliver_on:
             with timer("deliver"):
                 gh = make_github()
-                if gh is not None:
+                if gh is None:
+                    problems.append("GitHub delivery skipped: no GITHUB_TOKEN / GITHUB_REPO")
+                else:
                     try:
                         delivery = deliver_run(db, cfg, run_id, gh)
                     finally:
                         gh.close()
                     log_result(delivery)
+                    if delivery.error:
+                        problems.append(f"GitHub delivery failed ({delivery.error})")
         elif result.top:
             log.info("Delivery off (%s)", "--no-deliver" if args.no_deliver else f"provider: {cfg.deliver.provider}")
 
@@ -327,6 +339,13 @@ def main(argv: list[str] | None = None) -> int:
         print_rerank(result)
         print_summaries(summaries)
 
+    if problems:
+        # everything that worked is already saved; this only decides the exit code
+        level = logging.ERROR if args.strict else logging.WARNING
+        for p in problems:
+            log.log(level, "Degraded run: %s", p)
+        if args.strict:
+            return 1
     return 0
 
 

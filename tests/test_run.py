@@ -268,3 +268,46 @@ def test_github_failure_never_fails_the_run(setup, monkeypatch, caplog):
         assert run.main(args(setup)) == 0
     assert "GITHUB_TOKEN is invalid or expired" in caplog.text
     assert len(list((setup.parent / "data" / "digests").glob("*.md"))) == 1  # digest still saved
+
+
+# --- Day 5: --strict for CI ---
+def test_strict_clean_run_exits_0(setup, monkeypatch):
+    from fake_github import FakeGitHub
+
+    gh = FakeGitHub()
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    monkeypatch.setattr(run, "make_github", lambda: gh.client())
+    assert run.main(args(setup, "--strict")) == 0
+
+
+def test_strict_github_failure_exits_1_but_saves_everything(setup, monkeypatch, caplog):
+    import httpx
+    from fake_github import FakeGitHub
+
+    gh = FakeGitHub()
+    gh.before = lambda req: httpx.Response(401, json={"message": "Bad credentials"})
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    monkeypatch.setattr(run, "make_github", lambda: gh.client())
+    with caplog.at_level("ERROR"):
+        assert run.main(args(setup, "--strict")) == 1
+    assert "Degraded run: GitHub delivery failed" in caplog.text
+    assert len(list((setup.parent / "data" / "digests").glob("*.md"))) == 1
+    with Database(setup.parent / "data" / "test.db") as db:
+        assert db.get_run(1) is not None and len(db.selected_rankings(1)) == 3
+
+
+def test_strict_missing_llm_key_exits_1(setup, monkeypatch, caplog):
+    from fake_github import FakeGitHub
+
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: None)
+    monkeypatch.setattr(run, "make_github", lambda: FakeGitHub().client())
+    with caplog.at_level("ERROR"):
+        assert run.main(args(setup, "--strict")) == 1
+    assert "LLM rerank fell back" in caplog.text and "no paper got a summary" in caplog.text
+
+
+def test_degraded_run_without_strict_still_exits_0(setup, monkeypatch, caplog):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: None)  # make_github is None too
+    with caplog.at_level("WARNING"):
+        assert run.main(args(setup)) == 0
+    assert "Degraded run: GitHub delivery skipped" in caplog.text
