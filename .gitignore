@@ -12,6 +12,8 @@ venv/
 data/*.db
 # ...except the real DB: GitHub Actions commits it back after every weekly run (Day 5)
 !data/digest.db
+# ...and your labels + eval cache (you commit it; CI only reads it, Day 6)
+!data/labels.db
 # SQLite side files: only exist mid-write, never commit them
 data/*.db-journal
 data/*.db-wal

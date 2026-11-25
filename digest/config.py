@@ -81,6 +81,7 @@ class Config:
     rerank: RerankConfig = field(default_factory=RerankConfig)
     summarize: SummarizeConfig = field(default_factory=SummarizeConfig)
     deliver: DeliverConfig = field(default_factory=DeliverConfig)
+    labels_path: Path | None = None  # data/labels.db: your y/n labels + eval cache (you commit it, CI only reads)
 
 
 def load_config(path: str | Path) -> Config:
@@ -164,6 +165,7 @@ def load_config(path: str | Path) -> Config:
         embeddings=embeddings,
         # relative to the config file, so it works no matter where you run from
         db_path=(path.parent / d.get("path", "data/digest.db")).resolve(),
+        labels_path=(path.parent / d.get("labels_path", "data/labels.db")).resolve(),
         rerank=rerank,
         summarize=summarize,
         deliver=deliver,

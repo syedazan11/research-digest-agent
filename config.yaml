@@ -51,3 +51,4 @@ deliver:
 
 database:
   path: data/digest.db
+  labels_path: data/labels.db   # your y/n labels + eval cache; you commit it, CI only reads it
