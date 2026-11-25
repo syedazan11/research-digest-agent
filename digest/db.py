@@ -53,6 +53,19 @@ CREATE TABLE IF NOT EXISTS runs (
     retrievers  TEXT NOT NULL,          -- JSON list of retriever names used
     notes       TEXT
 );
+
+-- Per-run ranking snapshot: hybrid vs LLM, and what was selected. Ground truth for Precision@5 evals.
+CREATE TABLE IF NOT EXISTS rankings (
+    run_id        INTEGER NOT NULL REFERENCES runs(id),
+    paper_id      TEXT NOT NULL,
+    hybrid_rank   INTEGER NOT NULL,
+    hybrid_score  REAL NOT NULL,
+    llm_score     REAL,                 -- NULL if the LLM didn't score it (or rerank was off)
+    reason        TEXT,
+    final_rank    INTEGER,              -- 1..top_n if selected, else NULL
+    selected      INTEGER NOT NULL CHECK (selected IN (0, 1)),
+    PRIMARY KEY (run_id, paper_id)
+);
 """
 
 
@@ -61,10 +74,22 @@ def _now() -> str:
 
 
 class Database:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, in_memory_copy: bool = False):
+        """in_memory_copy=True (used by --dry-run): work on a throwaway in-memory snapshot of the DB.
+        Reads (dedup, embedding cache) behave exactly like a real run; every write vanishes on close
+        and nothing on disk is created or changed."""
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path)
+        if in_memory_copy:
+            self.conn = sqlite3.connect(":memory:")
+            if path.exists():
+                src = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+                try:
+                    src.backup(self.conn)
+                finally:
+                    src.close()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
 
@@ -145,3 +170,31 @@ class Database:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    # --- rankings ---
+    def save_rankings(self, run_id: int, rows: Iterable[dict]) -> None:
+        """rows: dicts with paper_id, hybrid_rank, hybrid_score, llm_score, reason, final_rank."""
+        self.conn.executemany(
+            """INSERT OR REPLACE INTO rankings
+               (run_id, paper_id, hybrid_rank, hybrid_score, llm_score, reason, final_rank, selected)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    run_id,
+                    r["paper_id"],
+                    r["hybrid_rank"],
+                    r["hybrid_score"],
+                    r.get("llm_score"),
+                    r.get("reason") or None,
+                    r.get("final_rank"),
+                    int(r.get("final_rank") is not None),
+                )
+                for r in rows
+            ],
+        )
+        self.conn.commit()
+
+    def get_rankings(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM rankings WHERE run_id = ? ORDER BY hybrid_rank", (run_id,)
+        ).fetchall()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -40,6 +40,18 @@ class EmbeddingConfig:
     dimensions: int = 768
 
 
+RERANK_PROVIDERS = {"groq", "gemini"}
+
+
+@dataclass
+class RerankConfig:
+    enabled: bool = True
+    provider: str = "groq"  # "groq" or "gemini" (see digest/llm.py)
+    model: str = "openai/gpt-oss-120b"
+    top_n: int = 5  # papers that make the final digest
+    batch_size: int = 5  # papers per LLM call
+
+
 @dataclass
 class Config:
     topic: TopicConfig
@@ -47,6 +59,7 @@ class Config:
     ranking: RankingConfig
     embeddings: EmbeddingConfig
     db_path: Path
+    rerank: RerankConfig = field(default_factory=RerankConfig)
 
 
 def load_config(path: str | Path) -> Config:
@@ -70,6 +83,7 @@ def load_config(path: str | Path) -> Config:
     w = r.get("weights") or {}
     e = raw.get("embeddings") or {}
     d = raw.get("database") or {}
+    rr = raw.get("rerank") or {}
 
     embeddings = EmbeddingConfig(
         provider=str(e.get("provider", "gemini")).lower(),
@@ -78,6 +92,18 @@ def load_config(path: str | Path) -> Config:
     )
     if embeddings.provider not in {"gemini", "none"}:
         raise ValueError(f"config: unknown embeddings.provider '{embeddings.provider}'")
+
+    rerank = RerankConfig(
+        enabled=bool(rr.get("enabled", True)),
+        provider=str(rr.get("provider", "groq")).lower(),
+        model=str(rr.get("model", "openai/gpt-oss-120b")),
+        top_n=int(rr.get("top_n", 5)),
+        batch_size=int(rr.get("batch_size", 5)),
+    )
+    if rerank.provider not in RERANK_PROVIDERS:
+        raise ValueError(f"config: unknown rerank.provider '{rerank.provider}' (use {sorted(RERANK_PROVIDERS)})")
+    if rerank.top_n < 1 or rerank.batch_size < 1:
+        raise ValueError("config: rerank.top_n and rerank.batch_size must be >= 1")
 
     return Config(
         topic=topic,
@@ -93,4 +119,5 @@ def load_config(path: str | Path) -> Config:
         embeddings=embeddings,
         # relative to the config file, so it works no matter where you run from
         db_path=(path.parent / d.get("path", "data/digest.db")).resolve(),
+        rerank=rerank,
     )

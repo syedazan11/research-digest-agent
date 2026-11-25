@@ -84,3 +84,30 @@ def test_gemini_retriever_uses_cache(db, papers):
     second = r.score(QUERY, papers)
     assert fake.models.calls == calls_after_first  # everything came from the cache
     assert second == pytest.approx(first)
+
+
+# --- a failing retriever is skipped, not fatal ---
+class Boom:
+    name = "embedding"
+
+    def score(self, query, papers):
+        raise RuntimeError("401 UNAUTHENTICATED")
+
+
+def test_hybrid_skips_failing_retriever(papers, caplog):
+    three = papers[:3]
+    ok = Stub("bm25", [0.2, 1.0, 0.6])
+    ranker = HybridRanker([(ok, 0.4), (Boom(), 0.6)])
+    with caplog.at_level("WARNING"):
+        ranked = ranker.rank("q", three, top_k=3)
+
+    assert [r.paper.id for r in ranked] == [three[1].id, three[2].id, three[0].id]
+    assert ranked[0].score == pytest.approx(1.0)  # weights renormalized over the survivors
+    assert ranked[0].components == {"bm25": 1.0}
+    assert ranker.active == ["bm25"] and ranker.names == ["bm25", "embedding"]
+    assert "Retriever 'embedding' failed" in caplog.text
+
+
+def test_hybrid_all_retrievers_failing_raises(papers):
+    with pytest.raises(RuntimeError, match="every retriever failed"):
+        HybridRanker([(Boom(), 1.0)]).rank("q", papers[:3], top_k=3)
