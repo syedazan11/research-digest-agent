@@ -40,5 +40,14 @@ summarize:
   max_input_tokens: 3000    # per paper: abstract + intro + conclusion from the PDF
   pdf_delay_seconds: 3      # arXiv asks for at most 1 request every 3 seconds
 
+# Stage 5: post the digest as a GitHub issue (one comment per paper; react 👍/👎 for feedback).
+# Needs GITHUB_TOKEN (Issues: read and write) and GITHUB_REPO=owner/name in .env.
+deliver:
+  provider: github          # github | none
+  close_previous: true      # close last run's digest issue when the new one is posted
+  comment_delay_seconds: 1  # GitHub asks for ~1s between posts
+  feedback_days: 30         # python -m digest.feedback reads reactions this far back
+  feedback_users: []        # whose reactions count; empty = the repo owner only
+
 database:
   path: data/digest.db

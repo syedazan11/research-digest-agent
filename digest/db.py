@@ -35,12 +35,36 @@ CREATE TABLE IF NOT EXISTS embeddings (
     PRIMARY KEY (key, model, dims)
 );
 
--- Filled by the Telegram poller (Day 4+).
+-- 👍/👎 per paper, filled by `python -m digest.feedback` from GitHub reactions (Day 4+).
+-- Older DBs lack the last three columns; Database._migrate() adds them.
 CREATE TABLE IF NOT EXISTS feedback (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     paper_id    TEXT NOT NULL REFERENCES papers(id),
     rating      INTEGER NOT NULL CHECK (rating IN (-1, 1)),
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,          -- when the reaction was made
+    comment_id  INTEGER,                -- the GitHub comment the reaction is on
+    source      TEXT,                   -- 'github'
+    updated_at  TEXT
+);
+
+-- One GitHub issue per run. Saved the moment the issue is created, so a crash can't open a second one.
+CREATE TABLE IF NOT EXISTS digest_issues (
+    run_id        INTEGER PRIMARY KEY REFERENCES runs(id),
+    issue_number  INTEGER NOT NULL,
+    issue_url     TEXT,
+    created_at    TEXT NOT NULL,
+    completed_at  TEXT,                 -- every paper's comment posted
+    closed_at     TEXT                  -- closed when the next digest went out
+);
+
+-- One row per posted comment, saved as each one is posted: a re-run resumes, never double-posts.
+CREATE TABLE IF NOT EXISTS deliveries (
+    run_id        INTEGER NOT NULL REFERENCES runs(id),
+    paper_id      TEXT NOT NULL,
+    issue_number  INTEGER NOT NULL,
+    comment_id    INTEGER NOT NULL,
+    posted_at     TEXT NOT NULL,
+    PRIMARY KEY (run_id, paper_id)
 );
 
 -- One row per pipeline run: your proof it ran unattended.
@@ -104,6 +128,19 @@ class Database:
             self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring older databases up to the current schema (CREATE IF NOT EXISTS can't add columns)."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(feedback)")}
+        for name, kind in (("comment_id", "INTEGER"), ("source", "TEXT"), ("updated_at", "TEXT")):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE feedback ADD COLUMN {name} {kind}")
+        # one GitHub rating per paper, so feedback can be upserted
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS feedback_github_paper ON feedback(paper_id) WHERE source = 'github'"
+        )
+        self.conn.commit()
 
     # --- context manager so `with Database(...) as db:` always closes ---
     def __enter__(self) -> "Database":
@@ -225,3 +262,102 @@ class Database:
             (paper_id, model, summary_json, source, fallback_reason, _now()),
         )
         self.conn.commit()
+
+    # --- runs / papers lookups (delivery rebuilds a run's digest from the DB) ---
+    def get_run(self, run_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+
+    def get_paper(self, paper_id: str) -> Paper | None:
+        row = self.conn.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
+        if row is None:
+            return None
+        return Paper.from_dict({**dict(row), "authors": json.loads(row["authors"]),
+                                "categories": json.loads(row["categories"])})
+
+    def selected_rankings(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM rankings WHERE run_id = ? AND selected = 1 ORDER BY final_rank", (run_id,)
+        ).fetchall()
+
+    def latest_undelivered_run(self) -> int | None:
+        """Newest run that selected papers but whose digest issue isn't complete."""
+        row = self.conn.execute(
+            """SELECT r.run_id FROM rankings r
+               LEFT JOIN digest_issues d ON d.run_id = r.run_id
+               WHERE r.selected = 1 AND d.completed_at IS NULL
+               ORDER BY r.run_id DESC LIMIT 1"""
+        ).fetchone()
+        return None if row is None else row["run_id"]
+
+    # --- GitHub delivery ---
+    def get_digest_issue(self, run_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM digest_issues WHERE run_id = ?", (run_id,)).fetchone()
+
+    def save_digest_issue(self, run_id: int, issue_number: int, issue_url: str = "") -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO digest_issues (run_id, issue_number, issue_url, created_at) VALUES (?, ?, ?, ?)",
+            (run_id, issue_number, issue_url, _now()),
+        )
+        self.conn.commit()
+
+    def mark_digest_complete(self, run_id: int) -> None:
+        self.conn.execute("UPDATE digest_issues SET completed_at = ? WHERE run_id = ? AND completed_at IS NULL",
+                          (_now(), run_id))
+        self.conn.commit()
+
+    def mark_digest_closed(self, run_id: int) -> None:
+        self.conn.execute("UPDATE digest_issues SET closed_at = ? WHERE run_id = ?", (_now(), run_id))
+        self.conn.commit()
+
+    def open_digests_before(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM digest_issues WHERE run_id < ? AND closed_at IS NULL ORDER BY run_id", (run_id,)
+        ).fetchall()
+
+    def delivered(self, run_id: int) -> dict[str, int]:
+        """paper_id -> comment_id for comments already posted in this run."""
+        rows = self.conn.execute("SELECT paper_id, comment_id FROM deliveries WHERE run_id = ?", (run_id,))
+        return {r["paper_id"]: r["comment_id"] for r in rows}
+
+    def save_delivery(self, run_id: int, paper_id: str, issue_number: int, comment_id: int) -> None:
+        now = _now()
+        self.conn.execute(
+            """INSERT OR IGNORE INTO deliveries (run_id, paper_id, issue_number, comment_id, posted_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (run_id, paper_id, issue_number, comment_id, now),
+        )
+        self.conn.execute("UPDATE papers SET sent_in_digest = ? WHERE id = ? AND sent_in_digest IS NULL",
+                          (now[:10], paper_id))
+        self.conn.commit()
+
+    def recent_deliveries(self, since_iso: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM deliveries WHERE posted_at >= ? ORDER BY posted_at", (since_iso,)
+        ).fetchall()
+
+    # --- feedback ---
+    def upsert_feedback(self, paper_id: str, rating: int, comment_id: int, reacted_at: str) -> bool:
+        """Insert or update the GitHub rating for a paper. Returns True if anything changed."""
+        old = self.get_feedback(paper_id)
+        if old is not None and old["rating"] == rating and old["comment_id"] == comment_id:
+            return False
+        self.conn.execute(
+            """INSERT INTO feedback (paper_id, rating, created_at, comment_id, source, updated_at)
+               VALUES (?, ?, ?, ?, 'github', ?)
+               ON CONFLICT(paper_id) WHERE source = 'github'
+               DO UPDATE SET rating = excluded.rating, created_at = excluded.created_at,
+                             comment_id = excluded.comment_id, updated_at = excluded.updated_at""",
+            (paper_id, rating, reacted_at, comment_id, _now()),
+        )
+        self.conn.commit()
+        return True
+
+    def delete_feedback(self, paper_id: str) -> bool:
+        cur = self.conn.execute("DELETE FROM feedback WHERE paper_id = ? AND source = 'github'", (paper_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_feedback(self, paper_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM feedback WHERE paper_id = ? AND source = 'github'", (paper_id,)
+        ).fetchone()
