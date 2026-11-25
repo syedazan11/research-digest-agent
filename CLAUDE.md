@@ -17,7 +17,8 @@ I'm a student building this for my portfolio. Explain design decisions briefly s
 ## Status
 - Day 1 done: arXiv fetch, SQLite dedup, BM25 ranking (Gemini embeddings off: Google `AQ.`-prefixed keys return 401)
 - Day 2 done: LLM reranking with Groq (digest/llm.py, digest/rerank.py, rankings table)
-- Day 3 next: PDFs + PyMuPDF summaries (see GUIDE.md)
+- Day 3 done: PDF sections + summaries + Markdown digest (digest/pdf.py, summarize.py, render.py, summaries table)
+- Day 4 next: Telegram bot with feedback buttons (see GUIDE.md)
 
 ## Eval backlog (Day 6)
 1. LLM rerank scores bunch up. Real run #3 (2026-11-24, 19 papers): the top 5 all scored 9, so the

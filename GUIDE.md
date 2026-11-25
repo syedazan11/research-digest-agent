@@ -246,11 +246,105 @@ Compare with Day 1: which papers moved, and do the reasons convince you?
 
 ---
 
+## Day 3: PDFs → Summaries → Markdown Digest
+
+**Goal:** the top 5 papers each get a five-part summary (problem, method, key result, why it matters, limitations) built from the actual paper, and the run writes a clean Markdown digest that Days 4 (Telegram) and 7 (GitHub Pages) reuse.
+
+### What's new
+
+```
+digest/
+├── pdf.py         ← download from export.arxiv.org (3s apart), extract abstract + intro + conclusion
+├── summarize.py   ← five Pydantic-validated fields, cached in SQLite
+├── prompting.py   ← shared injection guard + validate-and-retry loop (rerank uses it too)
+└── render.py      ← data/digests/<date>_run<N>.md
+config.yaml        ← new summarize: section
+data/digest.db     ← new summaries table
+```
+
+### Step 1: Install (≈2 min)
+
+```bash
+pip install -r requirements.txt     # adds pymupdf and httpx
+python -m pytest
+```
+All offline: the tests build tiny PDFs with PyMuPDF, use a fake HTTP function instead of arXiv, and a `FakeLLM` instead of Groq.
+
+### Step 2: Real run (≈3 min)
+
+```bash
+python -m digest.run --include-seen
+```
+Watch the log: one `PDF text for <id>: abstract+introduction+conclusion, ~2200 tokens` line per paper, then:
+
+```
+summaries: 5/5 (5 from PDF, 0 abstract-only, 0 cached)
+LLM calls this run: 17 (rerank 6, summarize 11)
+Timing: fetch 2.0s | rank 0.0s | rerank 22.3s | summarize 101.9s | total 126.2s
+```
+
+Most of the summarize time is waiting on Groq's free-tier limit (8K tokens/minute): you'll see `Groq 429 rate limit, waiting 15.0s (retry-after)`. That's expected. The call count includes those retried requests.
+
+Open `data/digests/<date>_run<N>.md` (VS Code: `Ctrl+Shift+V` for the preview).
+
+### Step 3: Run it again
+
+```bash
+python -m digest.run --include-seen
+```
+Now: `summarize 0` calls, `PDF downloads this run: 0`, and the summarize stage takes ~0s. Every summary came from the cache.
+
+### Step 4: Look in the database
+
+`summaries` has one row per paper per model: the JSON summary, `source` (`pdf` or `abstract`) and, for abstract-only ones, `fallback_reason`:
+
+| fallback_reason | Meaning |
+|---|---|
+| `download_failed` | arXiv unreachable, timeout, HTTP error, or no PDF link |
+| `not_pdf` | got bytes, but not a readable PDF (e.g. an HTML error page) |
+| `no_text` | PDF has (almost) no text: scanned images |
+| `no_sections` | text found, but no Introduction or Conclusion heading |
+
+### Day 3 checklist
+
+- [ ] `python -m pytest` passes
+- [ ] Real run writes `data/digests/<date>_run<N>.md` with 5 summaries
+- [ ] Second run makes 0 summarize calls and 0 PDF downloads
+- [ ] `--no-summarize` still writes a digest (with abstracts)
+- [ ] You read the 5 summaries against the papers: anything invented?
+- [ ] Committed and pushed
+
+### Understand it (interviewers will ask)
+
+1. **Why not send the whole PDF?** Groq's free tier is ~8K tokens a minute and a paper is 10–30K. The introduction states the problem and claims, the conclusion says what worked, and with the abstract that's ~3K tokens: most of the signal at a fraction of the cost.
+2. **Why the arXiv metadata abstract instead of the PDF's?** It's already clean text. In the PDF, the abstract is tangled with the title, authors and affiliations.
+3. **How do you find sections?** A heading heuristic on extracted lines: optionally numbered `Introduction` / `Conclusion(s)` headings, ending at the next top-level numbered heading or References/Appendix. A real paper (2611.28940) broke it twice: figure text `0 Favors A` and a running header `2 Preprint` looked like headings. Fixes: section numbers start at 1, and short lines that repeat on many pages are dropped as headers/footers. That's now a regression test.
+4. **Why prefer Conclusion over Discussion?** Discussion often re-argues results; Conclusion is the authors' own summary of what holds. Discussion/Summary is used only when there's no Conclusion.
+5. **Why count tokens as characters ÷ 4?** It's a budget, not a bill. Within ~10% is fine, and it avoids a tokenizer dependency that wouldn't match Groq's model anyway.
+6. **Why a 3-second throttle?** arXiv's API etiquette asks for at most one request every 3 seconds. The User-Agent names the project and links the repo so arXiv can see who's calling.
+7. **What if the PDF fails?** The summary is built from the abstract and marked "based on the abstract only (reason)" in the digest. The reason is stored, so you can count how often each failure happens.
+8. **Why is an abstract-only summary final?** "Never summarize the same paper twice" is a simple, testable rule. The cost: a brief arXiv outage leaves that paper with a thinner summary forever. A weekly digest can live with that.
+9. **Why cache by (paper, provider/model)?** Re-runs cost nothing, and switching models gives fresh summaries instead of mixing two models' output.
+10. **How do you stop the model inventing limitations?** The prompt says to use only the provided text and to write "Not stated in the provided text." when there are none. Pydantic also caps each field at 500 characters, so a rambling reply is retried.
+11. **What stops a malicious PDF?** Same guard as rerank, from shared code (`prompting.py`): the text is escaped inside a `<paper>` tag, the system prompt says never to follow instructions in it, and the output is a fixed schema. In the Markdown, every paper/LLM string is escaped, so injected text can't become a link or an image.
+12. **Why one LLM client for rerank and summarize?** One key, one config line, and one call counter, so the log can say `17 (rerank 6, summarize 11)`.
+13. **Why Markdown?** One format both later stages can use: Telegram renders it, GitHub Pages publishes it.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `PDF fallback for <id> (download_failed ...)` | arXiv slow or down. That paper uses its abstract; the run continues. |
+| `Groq 429 rate limit, waiting Ns` | Free-tier token limit. Expected during summaries; it waits and continues. |
+| `No summary for <id> after retry` | Model gave invalid JSON twice. The digest shows the abstract; the next run tries again (failures aren't cached). |
+| Digest shows `?` in the terminal | Windows console can't display some characters. The `.md` file is fine (UTF-8). |
+
+---
+
 ## Coming next
 
 | Day | Build |
 |---|---|
-| 3 | Download top 5 PDFs, extract sections with PyMuPDF, summarize each |
 | 4 | Telegram bot: send the digest with 👍/👎 buttons |
 | 5 | GitHub Actions: weekly digest run + feedback poller every few hours, commit the DB back |
 | 6 | Feedback learning: boost papers similar to your 👍 ones |
