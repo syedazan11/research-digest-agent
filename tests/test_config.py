@@ -43,3 +43,15 @@ def test_rerank_custom_values(tmp_path):
 def test_rerank_rejects_bad_values(tmp_path, extra):
     with pytest.raises(ValueError):
         load_config(write(tmp_path, extra))
+
+
+def test_summarize_section(tmp_path):
+    assert load_config(ROOT / "config.yaml").summarize.max_input_tokens == 3000
+    sc = load_config(write(tmp_path, "summarize:\n  enabled: false\n  max_input_tokens: 2000\n")).summarize
+    assert (sc.enabled, sc.max_input_tokens, sc.pdf_delay_seconds) == (False, 2000, 3.0)
+
+
+@pytest.mark.parametrize("extra", ["summarize:\n  pdf_delay_seconds: 1\n", "summarize:\n  max_input_tokens: 100\n"])
+def test_summarize_rejects_bad_values(tmp_path, extra):
+    with pytest.raises(ValueError):
+        load_config(write(tmp_path, extra))

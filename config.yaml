@@ -34,5 +34,11 @@ rerank:
   top_n: 5
   batch_size: 5
 
+# Stage 4: summarize the top_n papers (same LLM as rerank). Summaries are cached in the DB.
+summarize:
+  enabled: true
+  max_input_tokens: 3000    # per paper: abstract + intro + conclusion from the PDF
+  pdf_delay_seconds: 3      # arXiv asks for at most 1 request every 3 seconds
+
 database:
   path: data/digest.db

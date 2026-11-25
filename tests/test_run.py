@@ -7,6 +7,7 @@ import pytest
 import digest.run as run
 from conftest import FIXTURES, FakeLLM, score_by_title
 from digest.db import Database
+from digest.pdf import PdfFetcher, Throttle
 
 CONFIG = """
 topic:
@@ -31,7 +32,31 @@ def setup(tmp_path, monkeypatch):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(CONFIG, encoding="utf-8")
     monkeypatch.setattr(run, "load_dotenv", lambda *a, **k: None)  # never load the real .env
+    monkeypatch.setattr(run, "PdfFetcher", OfflineFetcher)  # never download a real PDF
     return cfg
+
+
+class OfflineFetcher(PdfFetcher):
+    def __init__(self, delay_seconds=3.0, **kw):
+        super().__init__(delay_seconds, get=self._no_network, throttle=Throttle(0))
+
+    @staticmethod
+    def _no_network(url):
+        raise ConnectionError("tests are offline")
+
+
+SUMMARY = {"problem": "P.", "method": "M.", "key_result": "Citations raise trust by 12%.",
+           "why_it_matters": "W.", "limitations": "Not stated in the provided text."}
+
+
+def rerank_and_summarize(scores: dict[str, float]):
+    """FakeLLM reply function answering both stages: summary prompts get a summary, rerank prompts scores."""
+    score = score_by_title(scores)
+
+    def fn(user):
+        return json.dumps(SUMMARY) if user.startswith("Summarize this paper") else score(user)
+
+    return fn
 
 
 def args(cfg, *extra):
@@ -62,13 +87,14 @@ def test_run_with_rerank_saves_scores(setup, monkeypatch, capsys):
         assert note.startswith("rerank: fake")
 
 
-def test_no_rerank_flag_never_builds_an_llm(setup, monkeypatch, capsys):
+def test_no_rerank_no_summarize_never_builds_an_llm(setup, monkeypatch, capsys):
     def boom(*a, **k):
-        raise AssertionError("make_llm must not be called with --no-rerank")
+        raise AssertionError("make_llm must not be called when no stage needs an LLM")
 
     monkeypatch.setattr(run, "make_llm", boom)
-    assert run.main(args(setup, "--no-rerank", "--dry-run")) == 0
-    assert "Rerank (rerank off)" in capsys.readouterr().out
+    assert run.main(args(setup, "--no-rerank", "--no-summarize", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "Rerank (rerank off)" in out and "summaries off" in out
 
 
 def test_missing_key_falls_back_to_hybrid(setup, monkeypatch, capsys):
@@ -127,3 +153,56 @@ def test_runs_on_the_same_day_never_overwrite(setup, monkeypatch):
     names = [p.name for p in sorted((setup.parent / "data" / "candidates").glob("*.json"))]
     assert len(names) == 2
     assert names[0].endswith("_run1.json") and names[1].endswith("_run2.json")
+
+
+# --- Day 3: summaries + digest ---
+def test_full_run_writes_markdown_digest(setup, monkeypatch, caplog):
+    llm = FakeLLM(default=rerank_and_summarize({"Grounded Answer": 10, "Hallucinations": 9}))
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: llm)
+    with caplog.at_level("INFO"):
+        assert run.main(args(setup)) == 0
+
+    [digest_file] = (setup.parent / "data" / "digests").glob("*.md")
+    assert digest_file.name.endswith("_run1.md")
+    md = digest_file.read_text(encoding="utf-8")
+    assert md.startswith("# Research digest: RAG evaluation\n")
+    assert "run 1 · 3 papers · ranked by fake/fake-1" in md
+    assert "## 1. Grounded Answer Generation: Do Citations Help Users Trust Model Outputs?" in md
+    assert "**Relevance:** 10/10 - fake reason" in md
+    assert md.count("- **Key result:** Citations raise trust by 12%.") == 3
+    # sample papers have no PDF link, so every summary is abstract-based and says so
+    assert md.count("*Summary based on the abstract only (download_failed).*") == 3
+
+    assert "LLM calls this run: 5 (rerank 2, summarize 3)" in caplog.text
+    assert "Timing: fetch" in caplog.text and "summarize" in caplog.text
+    with Database(setup.parent / "data" / "test.db") as db:
+        assert db.conn.execute("SELECT COUNT(*) FROM summaries").fetchone()[0] == 3
+        note = db.conn.execute("SELECT notes FROM runs WHERE id = 1").fetchone()[0]
+        assert "summaries: 3/3 (0 from PDF, 3 abstract-only, 0 cached)" in note
+
+
+def test_second_run_uses_summary_cache(setup, monkeypatch, caplog):
+    # a fresh client per run, like real runs (the call counter is per client)
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    assert run.main(args(setup)) == 0
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        assert run.main(args(setup, "--include-seen")) == 0
+    assert "(rerank 2, summarize 0)" in caplog.text
+    assert len(list((setup.parent / "data" / "digests").glob("*.md"))) == 2  # _run1.md and _run2.md
+
+
+def test_no_summarize_still_writes_a_digest_with_abstracts(setup, monkeypatch):
+    llm = FakeLLM(default=score_by_title({}))  # would fail on a summary prompt
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: llm)
+    assert run.main(args(setup, "--no-summarize")) == 0
+    assert llm.calls == 2  # rerank only
+    [digest_file] = (setup.parent / "data" / "digests").glob("*.md")
+    md = digest_file.read_text(encoding="utf-8")
+    assert md.count("*Summary unavailable. Abstract:*") == 3 and "**Key result:**" not in md
+
+
+def test_dry_run_writes_no_digest(setup, monkeypatch):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    assert run.main(args(setup, "--dry-run")) == 0
+    assert not (setup.parent / "data").exists()
