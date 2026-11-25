@@ -66,6 +66,18 @@ CREATE TABLE IF NOT EXISTS rankings (
     selected      INTEGER NOT NULL CHECK (selected IN (0, 1)),
     PRIMARY KEY (run_id, paper_id)
 );
+
+-- Summaries are cached so a paper is never summarized twice by the same model.
+-- An abstract-only summary is final: it isn't retried from the PDF on later runs.
+CREATE TABLE IF NOT EXISTS summaries (
+    paper_id         TEXT NOT NULL,
+    model            TEXT NOT NULL,     -- "provider/model", e.g. "groq/openai/gpt-oss-120b"
+    summary          TEXT NOT NULL,     -- JSON: problem, method, key_result, why_it_matters, limitations
+    source           TEXT NOT NULL CHECK (source IN ('pdf', 'abstract')),
+    fallback_reason  TEXT,              -- download_failed | not_pdf | no_text | no_sections; NULL for pdf
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (paper_id, model)
+);
 """
 
 
@@ -198,3 +210,18 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM rankings WHERE run_id = ? ORDER BY hybrid_rank", (run_id,)
         ).fetchall()
+
+    # --- summaries cache ---
+    def get_summary(self, paper_id: str, model: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM summaries WHERE paper_id = ? AND model = ?", (paper_id, model)
+        ).fetchone()
+
+    def put_summary(self, paper_id: str, model: str, summary_json: str, source: str,
+                    fallback_reason: str | None = None) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO summaries (paper_id, model, summary, source, fallback_reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (paper_id, model, summary_json, source, fallback_reason, _now()),
+        )
+        self.conn.commit()
