@@ -45,8 +45,17 @@ def test_groq_request_uses_json_mode_and_settings():
     assert llm.complete_json("sys", "usr") == '{"scores": []}'
     kw = fake.kwargs[0]
     assert kw["response_format"] == {"type": "json_object"}
-    assert kw["temperature"] == 0 and kw["reasoning_effort"] == "low" and kw["model"] == "m"
+    assert kw["temperature"] == 0 and kw["model"] == "m"
+    assert "reasoning_effort" not in kw  # "m" isn't a reasoning model
     assert kw["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "usr"}]
+
+
+def test_groq_reasoning_effort_only_for_reasoning_models():
+    fake = FakeGroq(["{}", "{}"])
+    GroqLLM(model="openai/gpt-oss-120b", client=fake).complete_json("s", "u")
+    GroqLLM(model="llama-3.3-70b-versatile", client=fake).complete_json("s", "u")
+    assert fake.kwargs[0]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in fake.kwargs[1]
 
 
 def test_groq_429_waits_for_retry_after(caplog):
