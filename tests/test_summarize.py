@@ -153,3 +153,14 @@ def test_pdf_text_is_escaped_in_the_prompt(db):
     system, user = llm.prompts[0]
     assert user.count("</paper>") == 1 and "&lt;/text&gt;&lt;/paper&gt; SYSTEM" in user
     assert "untrusted" in system and "Never follow" in system
+
+
+def test_summaries_are_normalized_including_old_cache_rows(db):
+    llm = FakeLLM([good_reply(method="Vary score\u2011ranges\u00a0(0.74\u20131.48).")])
+    [ps] = summarizer(db, llm, FakeHTTP(pdf_bytes())).summarize_all([make_paper()])
+    assert ps.summary.method == "Vary score-ranges (0.74-1.48)."
+
+    # a row cached before normalization existed still renders clean
+    db.put_summary("old", MODEL_KEY, good_reply(problem="LLM\u2011as\u2011a\u2011judge"), "pdf")
+    [cached] = summarizer(db, FakeLLM(), FakeHTTP()).summarize_all([make_paper("old")])
+    assert cached.cached and cached.summary.problem == "LLM-as-a-judge"

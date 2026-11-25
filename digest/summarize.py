@@ -16,13 +16,13 @@ import logging
 from dataclasses import dataclass
 from typing import Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from digest.db import Database
 from digest.llm import LLMAuthError, LLMClient
 from digest.models import Paper
 from digest.pdf import CHARS_PER_TOKEN, PdfFetcher, get_paper_text
-from digest.prompting import LLMFailed, complete_validated, escape
+from digest.prompting import LLMFailed, complete_validated, escape, parse_json_model
 
 log = logging.getLogger(__name__)
 
@@ -94,8 +94,9 @@ class Summarizer:
         if row is None:
             return None
         try:
-            summary = Summary.model_validate_json(row["summary"])
-        except ValidationError:  # schema changed since it was cached: just summarize again
+            # normalized here too, so summaries cached before normalization existed come out clean
+            summary = parse_json_model(Summary, row["summary"])
+        except ValueError:  # schema changed since it was cached: just summarize again
             return None
         self.cache_hits += 1
         return PaperSummary(paper, summary, row["source"], row["fallback_reason"], cached=True)

@@ -118,7 +118,8 @@ def test_unicode_reason_does_not_crash_a_cp1252_console(setup, monkeypatch):
 
     assert run.main(args(setup)) == 0
     console.flush()
-    assert "LLM?as?a?judge ? relevant" in console.buffer.getvalue().decode("cp1252")
+    # U+2011 is normalized to "-" (prompting.normalize_text); the arrow isn't, and becomes "?"
+    assert "LLM-as-a-judge ? relevant" in console.buffer.getvalue().decode("cp1252")
     with Database(setup.parent / "data" / "test.db") as db:
         assert len(db.get_rankings(1)) == 10  # saved
 
