@@ -69,3 +69,13 @@ def test_deliver_section(tmp_path):
 def test_deliver_rejects_bad_values(tmp_path, extra):
     with pytest.raises(ValueError):
         load_config(write(tmp_path, extra))
+
+
+def test_day6_config(tmp_path):
+    cfg = load_config(ROOT / "config.yaml")
+    assert cfg.rerank.prompt_version in {"v1", "v2", "v3"}
+    assert cfg.labels_path.name == "labels.db"
+    c = load_config(write(tmp_path, "ranking:\n  weights:\n    feedback: 0.3\nrerank:\n  prompt_version: v3\n"))
+    assert c.ranking.feedback_weight == 0.3 and c.rerank.prompt_version == "v3"
+    with pytest.raises(ValueError):
+        load_config(write(tmp_path, "rerank:\n  prompt_version: v9\n"))

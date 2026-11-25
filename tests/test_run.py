@@ -71,7 +71,7 @@ def test_run_with_rerank_saves_scores(setup, monkeypatch, capsys):
     assert run.main(args(setup)) == 0
 
     out = capsys.readouterr().out
-    assert "Rerank (rerank: fake/fake-1, 10/10 scored)" in out
+    assert "Rerank (rerank: fake/fake-1 prompt v1, 10/10 scored)" in out
     assert "fake reason" in out
 
     [cand_file] = (setup.parent / "data" / "candidates").glob("*.json")
@@ -311,3 +311,23 @@ def test_degraded_run_without_strict_still_exits_0(setup, monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert run.main(args(setup)) == 0
     assert "Degraded run: GitHub delivery skipped" in caplog.text
+
+
+# --- Day 6: feedback retriever in the pipeline ---
+def test_run_uses_feedback_retriever_when_weighted(setup, monkeypatch, caplog):
+    from digest.labels import LabelStore
+    from digest.fetch import load_sample
+
+    cfg_text = setup.read_text(encoding="utf-8").replace(
+        "ranking:\n  top_k: 10", "ranking:\n  top_k: 10\n  weights:\n    bm25: 0.6\n    feedback: 0.4")
+    setup.write_text(cfg_text + "  labels_path: data/labels.db\n", encoding="utf-8")
+    sample = load_sample(FIXTURES / "sample_papers.json")
+    with LabelStore(setup.parent / "data" / "labels.db") as s:
+        s.add_to_pool(sample)
+        s.set_label("sample-002", True)
+        s.set_label("sample-005", False)
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: None)
+    with caplog.at_level("INFO"):
+        assert run.main(args(setup, "--dry-run", "--no-deliver")) == 0
+    assert "Feedback retriever: 1 liked, 1 disliked (0 reactions, 2 labels), weight 0.40" in caplog.text
+    assert "Retrievers: bm25, feedback" in caplog.text

@@ -31,6 +31,7 @@ class RankingConfig:
     top_k: int = 20
     bm25_weight: float = 0.4
     embedding_weight: float = 0.6
+    feedback_weight: float = 0.0  # Rocchio feedback retriever (Day 6); 0 = off
 
 
 @dataclass
@@ -50,6 +51,7 @@ class RerankConfig:
     model: str = "openai/gpt-oss-120b"
     top_n: int = 5  # papers that make the final digest
     batch_size: int = 5  # papers per LLM call
+    prompt_version: str = "v1"  # see digest/rerank.py PROMPTS; chosen by python -m digest.eval
 
 
 @dataclass
@@ -123,7 +125,12 @@ def load_config(path: str | Path) -> Config:
         model=str(rr.get("model", "openai/gpt-oss-120b")),
         top_n=int(rr.get("top_n", 5)),
         batch_size=int(rr.get("batch_size", 5)),
+        prompt_version=str(rr.get("prompt_version", "v1")),
     )
+    from digest.rerank import PROMPTS  # local import: rerank imports retrieval, keep config light
+
+    if rerank.prompt_version not in PROMPTS:
+        raise ValueError(f"config: unknown rerank.prompt_version '{rerank.prompt_version}' (use {sorted(PROMPTS)})")
     if rerank.provider not in RERANK_PROVIDERS:
         raise ValueError(f"config: unknown rerank.provider '{rerank.provider}' (use {sorted(RERANK_PROVIDERS)})")
     if rerank.top_n < 1 or rerank.batch_size < 1:
@@ -161,6 +168,7 @@ def load_config(path: str | Path) -> Config:
             top_k=int(r.get("top_k", 20)),
             bm25_weight=float(w.get("bm25", 0.4)),
             embedding_weight=float(w.get("embedding", 0.6)),
+            feedback_weight=float(w.get("feedback", 0.0)),
         ),
         embeddings=embeddings,
         # relative to the config file, so it works no matter where you run from

@@ -18,7 +18,8 @@ from the profile first. A paper's own label can never help it, in production or 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
@@ -27,6 +28,9 @@ from digest.retrieval.tfidf import TfidfVectorizer
 
 BETA = 0.75
 GAMMA = 0.25
+
+if TYPE_CHECKING:
+    from digest.db import Database
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,22 @@ def merge_examples(reactions: Sequence[Example], labels: Sequence[Example]) -> l
     by_id = {e.paper.id: e for e in labels}
     by_id.update({e.paper.id: e for e in reactions})
     return list(by_id.values())
+
+
+def load_examples(db: "Database", labels_path: Path | None) -> list[Example]:
+    """Training examples for production: 👍/👎 reactions (digest.db) + y/n labels (labels.db, read-only)."""
+    from digest.labels import LabelStore
+
+    reactions = []
+    for row in db.conn.execute("SELECT paper_id, rating FROM feedback WHERE source = 'github'"):
+        paper = db.get_paper(row["paper_id"])
+        if paper is not None:
+            reactions.append(Example(paper, int(row["rating"]), "reaction"))
+    labels = []
+    if labels_path is not None:
+        with LabelStore(labels_path, read_only=True) as store:  # CI must never write to labels.db
+            labels = [Example(p, 1 if rel else -1, "label") for p, rel in store.labelled_papers()]
+    return merge_examples(reactions, labels)
 
 
 class FeedbackRetriever:

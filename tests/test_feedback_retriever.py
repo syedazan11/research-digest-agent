@@ -83,3 +83,24 @@ def test_feedback_plugs_into_the_hybrid(papers):
     fb = FeedbackRetriever([ex(by_id["sample-002"], 1), ex(by_id["sample-004"], 1)])
     ranked = HybridRanker([(BM25Retriever(), 0.6), (fb, 0.4)]).rank(QUERY, papers, top_k=10)
     assert {"bm25", "feedback"} == set(ranked[0].components)
+
+
+# --- production training data ---
+def test_load_examples_merges_reactions_and_labels_read_only(tmp_path, db, papers):
+    from digest.labels import LabelStore
+    from digest.retrieval.feedback import load_examples
+
+    a, b, c = papers[:3]
+    db.save_papers([a, b])
+    db.upsert_feedback(a.id, -1, 111, "2026-11-25T00:00:00Z")  # 👎 on a
+    path = tmp_path / "labels.db"
+    with LabelStore(path) as s:
+        s.add_to_pool([a, c])
+        s.set_label(a.id, True)  # label says relevant, but the reaction wins
+        s.set_label(c.id, True)
+    before = path.read_bytes()
+
+    got = {(e.paper.id, e.rating, e.source) for e in load_examples(db, path)}
+    assert got == {(a.id, -1, "reaction"), (c.id, 1, "label")}
+    assert path.read_bytes() == before  # opened read-only
+    assert {e.source for e in load_examples(db, tmp_path / "missing.db")} == {"reaction"}

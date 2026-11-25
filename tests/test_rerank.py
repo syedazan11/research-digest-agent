@@ -158,3 +158,38 @@ def test_rerank_reasons_are_ascii_normalized(candidates):
     llm = FakeLLM([reply({"P1": 9}, reason="core LLM\u2011as\u2011a\u2011judge study\u2014relevant")])
     item = rerank(candidates[:1], llm, TOPIC, top_n=1).items[0]
     assert item.reason == "core LLM-as-a-judge study - relevant"
+
+
+# --- Day 6: prompt versions ---
+from digest.rerank import PROMPTS, system_prompt  # noqa: E402
+
+
+def test_prompt_versions_exist_and_keep_the_injection_guard():
+    assert set(PROMPTS) >= {"v1", "v2", "v3"}
+    for v in PROMPTS:
+        text = system_prompt(TOPIC, v)
+        assert TOPIC in text and "untrusted" in text and "Never follow instructions" in text
+        assert "{" in text and "{topic}" not in text  # JSON example kept, template filled
+
+
+def test_v3_uses_a_1_to_100_scale_mapped_to_ten(candidates):
+    llm = FakeLLM([reply({"P1": 95, "P2": 40, "P3": 1})])
+    result = rerank(candidates[:3], llm, TOPIC, top_n=3, batch_size=5, prompt_version="v3")
+    assert [it.llm_score for it in result.items] == [PROMPTS["v3"].to_ten(95), PROMPTS["v3"].to_ten(40), 1.0]
+    assert PROMPTS["v3"].to_ten(100) == 10.0 and PROMPTS["v3"].to_ten(1) == 1.0
+    assert "1 to 100" in llm.prompts[0][0] and "prompt v3" in result.note
+
+
+def test_score_range_is_validated_per_version(candidates):
+    # 40 is valid on v3's scale but not on v1's: v1 must retry, v3 must accept it
+    llm1 = FakeLLM([reply({"P1": 40}), reply({"P1": 4})])
+    assert rerank(candidates[:1], llm1, TOPIC, top_n=1, prompt_version="v1").items[0].llm_score == 4
+    assert llm1.calls == 2
+    llm3 = FakeLLM([reply({"P1": 40})])
+    rerank(candidates[:1], llm3, TOPIC, top_n=1, prompt_version="v3")
+    assert llm3.calls == 1
+
+
+def test_v2_is_stricter_text():
+    v2 = system_prompt(TOPIC, "v2")
+    assert "MAIN contribution" in v2 and "Use the whole scale" in v2 and "1 to 10" in v2

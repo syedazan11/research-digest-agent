@@ -35,6 +35,7 @@ from digest.pdf import PdfFetcher
 from digest.render import render_digest
 from digest.rerank import RerankedPaper, RerankResult, hybrid_only, rerank
 from digest.retrieval import BM25Retriever, HybridRanker, RankedPaper
+from digest.retrieval.feedback import FeedbackRetriever, load_examples
 from digest.summarize import PaperSummary, Summarizer
 
 log = logging.getLogger("digest")
@@ -55,6 +56,13 @@ def build_ranker(cfg: Config, db: Database, use_embeddings: bool) -> tuple[Hybri
                 db, api_key=api_key, model=cfg.embeddings.model, dimensions=cfg.embeddings.dimensions
             )
             weighted.append((embedder, cfg.ranking.embedding_weight))
+
+    if cfg.ranking.feedback_weight > 0:
+        fb = FeedbackRetriever(load_examples(db, cfg.labels_path))
+        c = fb.counts()
+        log.info("Feedback retriever: %d liked, %d disliked (%d reactions, %d labels), weight %.2f",
+                 c["positive"], c["negative"], c["reaction"], c["label"], cfg.ranking.feedback_weight)
+        weighted.append((fb, cfg.ranking.feedback_weight))
 
     return HybridRanker(weighted), embedder
 
@@ -132,7 +140,8 @@ def run_rerank(cfg: Config, ranked: list[RankedPaper], llm, enabled: bool) -> Re
     if llm is None:  # make_llm already logged why
         return hybrid_only(ranked, rc.top_n, note=f"rerank skipped: no {rc.provider} client")
     log.info("LLM rerank: %s/%s, %d candidates in batches of %d", llm.name, llm.model, len(ranked), rc.batch_size)
-    return rerank(ranked, llm, topic=topic_text(cfg), top_n=rc.top_n, batch_size=rc.batch_size)
+    return rerank(ranked, llm, topic=topic_text(cfg), top_n=rc.top_n, batch_size=rc.batch_size,
+                  prompt_version=rc.prompt_version)
 
 
 def topic_text(cfg: Config) -> str:
