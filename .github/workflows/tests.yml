@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+# CI only reads the code. No secrets are referenced anywhere in this workflow.
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Belt and braces: the tests use fakes for Groq, GitHub and arXiv, and blank keys mean
+      # nothing could reach a real API even if a test forgot to stub it.
+      GROQ_API_KEY: ""
+      GEMINI_API_KEY: ""
+      GITHUB_TOKEN: ""
+      GITHUB_REPO: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest -q
