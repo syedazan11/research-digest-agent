@@ -1,6 +1,6 @@
 # Research Digest Agent
 
-Weekly arXiv digest: fetch -> dedup -> hybrid rank -> LLM rerank -> summarize -> Telegram -> learn from feedback.
+Weekly arXiv digest: fetch -> dedup -> hybrid rank -> LLM rerank -> summarize -> GitHub issue -> learn from reactions.
 I'm a student building this for my portfolio. Explain design decisions briefly so I can defend them in interviews.
 
 ## Run / test
@@ -10,6 +10,7 @@ I'm a student building this for my portfolio. Explain design decisions briefly s
 
 ## Rules
 - Never read, print or commit .env
+- Tests must never reach real GitHub: use tests/fake_github.py (httpx.MockTransport); test_run stubs make_github
 - Keep pluggable designs: retrievers follow digest/retrieval/base.py; LLM providers are swappable via config.yaml
 - A failing API must never crash the run: log a clear warning and fall back
 - Add/update tests for every change; all tests must pass before you finish
@@ -18,7 +19,9 @@ I'm a student building this for my portfolio. Explain design decisions briefly s
 - Day 1 done: arXiv fetch, SQLite dedup, BM25 ranking (Gemini embeddings off: Google `AQ.`-prefixed keys return 401)
 - Day 2 done: LLM reranking with Groq (digest/llm.py, digest/rerank.py, rankings table)
 - Day 3 done: PDF sections + summaries + Markdown digest (digest/pdf.py, summarize.py, render.py, summaries table)
-- Day 4 next: Telegram bot with feedback buttons (see GUIDE.md)
+- Day 4 done: GitHub Issues delivery + reaction feedback (digest/github.py, deliver.py, feedback.py;
+  digest_issues + deliveries tables). Telegram dropped: blocked in Pakistan.
+- Day 5 next: GitHub Actions (weekly run + feedback poller, commit the DB back)
 
 ## Eval backlog (Day 6)
 1. LLM rerank scores bunch up. Real run #3 (2026-11-24, 19 papers): the top 5 all scored 9, so the
