@@ -11,6 +11,8 @@ venv/
 # local run output (the DB gets un-ignored on Day 5, when GitHub Actions commits it)
 data/*.db
 data/candidates/
+# data/digests/ gets un-ignored on Day 7, when GitHub Pages publishes it
+data/digests/
 
 # editors / OS
 .vscode/

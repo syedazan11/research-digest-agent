@@ -53,6 +53,13 @@ class RerankConfig:
 
 
 @dataclass
+class SummarizeConfig:
+    enabled: bool = True
+    max_input_tokens: int = 3000  # per paper: abstract + intro + conclusion (Groq free tier: 8K/min)
+    pdf_delay_seconds: float = 3.0  # arXiv asks for at most 1 request every 3 seconds
+
+
+@dataclass
 class Config:
     topic: TopicConfig
     fetch: FetchConfig
@@ -60,6 +67,7 @@ class Config:
     embeddings: EmbeddingConfig
     db_path: Path
     rerank: RerankConfig = field(default_factory=RerankConfig)
+    summarize: SummarizeConfig = field(default_factory=SummarizeConfig)
 
 
 def load_config(path: str | Path) -> Config:
@@ -84,6 +92,7 @@ def load_config(path: str | Path) -> Config:
     e = raw.get("embeddings") or {}
     d = raw.get("database") or {}
     rr = raw.get("rerank") or {}
+    sm = raw.get("summarize") or {}
 
     embeddings = EmbeddingConfig(
         provider=str(e.get("provider", "gemini")).lower(),
@@ -105,6 +114,16 @@ def load_config(path: str | Path) -> Config:
     if rerank.top_n < 1 or rerank.batch_size < 1:
         raise ValueError("config: rerank.top_n and rerank.batch_size must be >= 1")
 
+    summarize = SummarizeConfig(
+        enabled=bool(sm.get("enabled", True)),
+        max_input_tokens=int(sm.get("max_input_tokens", 3000)),
+        pdf_delay_seconds=float(sm.get("pdf_delay_seconds", 3.0)),
+    )
+    if summarize.max_input_tokens < 500:
+        raise ValueError("config: summarize.max_input_tokens must be >= 500")
+    if summarize.pdf_delay_seconds < 3.0:
+        raise ValueError("config: summarize.pdf_delay_seconds must be >= 3 (arXiv's rate limit)")
+
     return Config(
         topic=topic,
         fetch=FetchConfig(
@@ -120,4 +139,5 @@ def load_config(path: str | Path) -> Config:
         # relative to the config file, so it works no matter where you run from
         db_path=(path.parent / d.get("path", "data/digest.db")).resolve(),
         rerank=rerank,
+        summarize=summarize,
     )

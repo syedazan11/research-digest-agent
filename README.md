@@ -2,7 +2,7 @@
 
 An agent that tracks new arXiv papers on a topic you choose, ranks them with hybrid retrieval and LLM reranking, and sends a weekly digest to Telegram. It learns from your 👍/👎 ratings.
 
-> **Status: Day 2 of 7.** Fetch → dedup → hybrid ranking → LLM rerank works. Summaries, Telegram, automation and feedback come next. See [GUIDE.md](GUIDE.md).
+> **Status: Day 3 of 7.** Fetch → dedup → hybrid ranking → LLM rerank → PDF summaries → Markdown digest works. Summaries, Telegram, automation and feedback come next. See [GUIDE.md](GUIDE.md).
 
 ## Pipeline
 
@@ -32,6 +32,7 @@ python -m digest.run              # real run
 | Embeddings | Gemini API, cached in SQLite | No PyTorch to install on CI; each paper is embedded once. |
 | Reranking | LLM scores top 20 from 1-10 with a reason, Pydantic-validated, keeps top 5 | Similarity ≠ usefulness. Provider is swappable (Groq/Gemini) in `config.yaml`; any failure falls back to hybrid order. |
 | Prompt injection | Abstracts escaped inside `<paper>` tags, labelled P1..P5, marked untrusted | Abstracts are third-party text; a paper must not be able to rank itself. |
+| Summaries | Abstract + introduction + conclusion from the PDF (~3K tokens), five Pydantic-validated fields, cached per paper and model | Most of a paper's signal at a fraction of the tokens; any PDF failure falls back to the abstract with a recorded reason. |
 | Storage | SQLite | One file, zero setup, commits back to the repo from GitHub Actions. |
 
 ## Results

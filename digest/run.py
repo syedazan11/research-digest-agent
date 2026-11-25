@@ -1,9 +1,10 @@
-"""Pipeline: fetch -> dedup -> hybrid ranking (top K) -> LLM rerank (top N).
+"""Pipeline: fetch -> dedup -> hybrid ranking (top K) -> LLM rerank (top N) -> summaries -> digest.
 
 Usage (from the project folder):
-    python -m digest.run                      # real run: arXiv + hybrid ranking + LLM rerank
+    python -m digest.run                      # real run: arXiv + ranking + rerank + summaries
     python -m digest.run --no-embeddings      # BM25 only for the hybrid stage
-    python -m digest.run --no-rerank          # skip the LLM, keep the hybrid top N
+    python -m digest.run --no-rerank          # skip the LLM rerank, keep the hybrid top N
+    python -m digest.run --no-summarize       # skip PDFs and summaries (digest shows abstracts)
     python -m digest.run --sample tests/fixtures/sample_papers.json --dry-run   # offline test
 """
 
@@ -14,6 +15,8 @@ import json
 import logging
 import os
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,8 +26,11 @@ from digest.config import Config, load_config
 from digest.db import Database
 from digest.fetch import fetch_recent, load_sample
 from digest.llm import make_llm
-from digest.rerank import RerankResult, hybrid_only, rerank
+from digest.pdf import PdfFetcher
+from digest.render import render_digest
+from digest.rerank import RerankedPaper, RerankResult, hybrid_only, rerank
 from digest.retrieval import BM25Retriever, HybridRanker, RankedPaper
+from digest.summarize import PaperSummary, Summarizer
 
 log = logging.getLogger("digest")
 
@@ -92,20 +98,88 @@ def save_candidates(result: RerankResult, out_dir: Path, run_id: int) -> Path:
     return path
 
 
-def run_rerank(cfg: Config, ranked: list[RankedPaper], enabled: bool) -> tuple[RerankResult, object | None]:
+class StageTimer:
+    """Wall-clock seconds per stage, logged at the end: shows where a run spends its time."""
+
+    def __init__(self):
+        self.times: dict[str, float] = {}
+
+    @contextmanager
+    def __call__(self, name: str):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.times[name] = self.times.get(name, 0.0) + time.perf_counter() - t0
+
+    def line(self) -> str:
+        parts = [f"{k} {v:.1f}s" for k, v in self.times.items()]
+        return " | ".join(parts + [f"total {sum(self.times.values()):.1f}s"])
+
+
+def run_rerank(cfg: Config, ranked: list[RankedPaper], llm, enabled: bool) -> RerankResult:
     rc = cfg.rerank
     if not ranked:
-        return hybrid_only(ranked, rc.top_n, note="rerank: no candidates"), None
+        return hybrid_only(ranked, rc.top_n, note="rerank: no candidates")
     if not enabled:
         log.info("LLM rerank off: keeping the hybrid top %d", rc.top_n)
-        return hybrid_only(ranked, rc.top_n, note="rerank off"), None
-    llm = make_llm(rc.provider, rc.model)
+        return hybrid_only(ranked, rc.top_n, note="rerank off")
     if llm is None:  # make_llm already logged why
-        return hybrid_only(ranked, rc.top_n, note=f"rerank skipped: no {rc.provider} client"), None
+        return hybrid_only(ranked, rc.top_n, note=f"rerank skipped: no {rc.provider} client")
     log.info("LLM rerank: %s/%s, %d candidates in batches of %d", llm.name, llm.model, len(ranked), rc.batch_size)
-    result = rerank(ranked, llm, topic=f"{cfg.topic.name}. {cfg.topic.description}",
-                    top_n=rc.top_n, batch_size=rc.batch_size)
-    return result, llm
+    return rerank(ranked, llm, topic=topic_text(cfg), top_n=rc.top_n, batch_size=rc.batch_size)
+
+
+def topic_text(cfg: Config) -> str:
+    return f"{cfg.topic.name}. {cfg.topic.description}"
+
+
+def run_summarize(cfg: Config, db: Database, selected: list[RerankedPaper], llm) -> list[PaperSummary]:
+    fetcher = PdfFetcher(delay_seconds=cfg.summarize.pdf_delay_seconds)
+    try:
+        summarizer = Summarizer(
+            llm, db, fetcher, topic_text(cfg),
+            model_key=f"{cfg.rerank.provider}/{cfg.rerank.model}",
+            max_input_tokens=cfg.summarize.max_input_tokens,
+        )
+        summaries = summarizer.summarize_all([it.ranked.paper for it in selected])
+    finally:
+        fetcher.close()
+    log.info("PDF downloads this run: %d, summary cache hits: %d", fetcher.downloads, summarizer.cache_hits)
+    return summaries
+
+
+def summaries_note(summaries: list[PaperSummary]) -> str:
+    done = [s for s in summaries if s.summary is not None]
+    n_pdf = sum(s.source == "pdf" for s in done)
+    n_cached = sum(s.cached for s in done)
+    return (f"summaries: {len(done)}/{len(summaries)} ({n_pdf} from PDF, {len(done) - n_pdf} abstract-only, "
+            f"{n_cached} cached)")
+
+
+def print_summaries(summaries: list[PaperSummary]) -> None:
+    if not summaries:
+        return
+    off = all(s.error == "summaries off" for s in summaries)
+    print(f"\nDigest ({'summaries off: abstracts only' if off else summaries_note(summaries)})")
+    print("-" * 100)
+    for i, s in enumerate(summaries, 1):
+        if s.summary is None:
+            tag = f"no summary: {s.error}" if s.error else "no summary"
+        else:
+            tag = s.source if not s.fallback_reason else f"abstract: {s.fallback_reason}"
+            if s.cached:
+                tag += ", cached"
+        print(f"{i}. [{tag}] {_short(s.paper.title, 75)}")
+        if s.summary is not None:
+            print(f"   {_short(s.summary.key_result, 95)}")
+
+
+def save_digest(text: str, out_dir: Path, run_id: int) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{datetime.now(timezone.utc):%Y-%m-%d}_run{run_id}.md"
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,8 +188,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sample", help="load papers from a JSON file instead of arXiv (offline)")
     ap.add_argument("--no-embeddings", action="store_true", help="BM25 only, no Gemini calls")
     ap.add_argument("--no-rerank", action="store_true", help="skip LLM reranking, keep the hybrid top N")
+    ap.add_argument("--no-summarize", action="store_true", help="skip PDF download and summaries")
     ap.add_argument("--include-seen", action="store_true", help="rank papers even if seen in an earlier run")
-    ap.add_argument("--dry-run", action="store_true", help="don't save papers or log the run to the DB")
+    ap.add_argument("--dry-run", action="store_true", help="write nothing: no DB changes, no output files")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -135,46 +210,68 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(args.config)
     log.info("Topic: %s", cfg.topic.name)
+    timer = StageTimer()
+    rerank_on = cfg.rerank.enabled and not args.no_rerank
+    summarize_on = cfg.summarize.enabled and not args.no_summarize
 
     # --dry-run works on an in-memory snapshot: same reads as a real run, nothing written to disk
     with Database(cfg.db_path, in_memory_copy=args.dry_run) as db:
         # 1. fetch
-        if args.sample:
-            papers = load_sample(args.sample)
-        else:
-            try:
-                papers = fetch_recent(
-                    cfg.topic.keywords, cfg.topic.categories, cfg.fetch.days_back, cfg.fetch.max_results
-                )
-            except Exception as e:  # network down, arXiv overloaded, etc.
-                log.error("Could not reach arXiv (%s: %s). Check your internet, or test offline "
-                          "with --sample tests/fixtures/sample_papers.json", type(e).__name__, str(e)[:200])
-                return 1
+        with timer("fetch"):
+            if args.sample:
+                papers = load_sample(args.sample)
+            else:
+                try:
+                    papers = fetch_recent(
+                        cfg.topic.keywords, cfg.topic.categories, cfg.fetch.days_back, cfg.fetch.max_results
+                    )
+                except Exception as e:  # network down, arXiv overloaded, etc.
+                    log.error("Could not reach arXiv (%s: %s). Check your internet, or test offline "
+                              "with --sample tests/fixtures/sample_papers.json", type(e).__name__, str(e)[:200])
+                    return 1
 
         # 2. dedup
         new = papers if args.include_seen else db.filter_new(papers)
         log.info("%d fetched, %d new (%d already seen)", len(papers), len(new), len(papers) - len(new))
 
         # 3. hybrid rank
-        ranker, embedder = build_ranker(cfg, db, use_embeddings=not args.no_embeddings)
-        log.info("Retrievers: %s", ", ".join(ranker.names))
-        ranked = ranker.rank(cfg.topic.ranking_query(), new, cfg.ranking.top_k)
+        with timer("rank"):
+            ranker, embedder = build_ranker(cfg, db, use_embeddings=not args.no_embeddings)
+            log.info("Retrievers: %s", ", ".join(ranker.names))
+            ranked = ranker.rank(cfg.topic.ranking_query(), new, cfg.ranking.top_k)
         if embedder is not None:
             log.info("Gemini embedding API calls this run: %d", embedder.api_calls)
         print_ranking(ranked)
 
+        # one LLM client for rerank + summarize: one key, one call counter
+        llm = make_llm(cfg.rerank.provider, cfg.rerank.model) if ranked and (rerank_on or summarize_on) else None
+
         # 4. LLM rerank (falls back to hybrid order on any failure)
-        result, llm = run_rerank(cfg, ranked, enabled=cfg.rerank.enabled and not args.no_rerank)
-        if llm is not None:
-            log.info("LLM API calls this run: %d", llm.calls)
+        with timer("rerank"):
+            result = run_rerank(cfg, ranked, llm, enabled=rerank_on)
+        rerank_calls = llm.calls if llm is not None else 0
         log.info(result.note)
 
-        # 5. output (saved before printing, so a console problem can never lose a paid-for run)
+        # 5. summarize the selected papers (falls back to the abstract on any failure)
+        summaries: list[PaperSummary] = []
+        if summarize_on and result.top:
+            with timer("summarize"):
+                summaries = run_summarize(cfg, db, result.top, llm)
+            log.info(summaries_note(summaries))
+        elif result.top:
+            log.info("Summaries off: the digest shows abstracts")
+            summaries = [PaperSummary(it.ranked.paper, None, "abstract", error="summaries off") for it in result.top]
+        if llm is not None:
+            log.info("LLM calls this run: %d (rerank %d, summarize %d)",
+                     llm.calls, rerank_calls, llm.calls - rerank_calls)
+
+        # 6. output (saved before printing, so a console problem can never lose a paid-for run)
         if args.dry_run:
-            log.info("Dry run: nothing written (no database changes, no candidates file)")
+            log.info("Dry run: nothing written (no database changes, no candidates or digest file)")
         else:
+            notes = result.note + (f"; {summaries_note(summaries)}" if summarize_on and summaries else "")
             db.save_papers(new)
-            run_id = db.log_run(len(papers), len(new), len(ranked), ranker.active, notes=result.note)
+            run_id = db.log_run(len(papers), len(new), len(ranked), ranker.active, notes=notes)
             db.save_rankings(run_id, (
                 {
                     "paper_id": it.ranked.paper.id,
@@ -190,8 +287,16 @@ def main(argv: list[str] | None = None) -> int:
             if result.items:
                 out = save_candidates(result, cfg.db_path.parent / "candidates", run_id)
                 log.info("Saved candidates to %s", out)
+            if result.top:
+                ranked_by = f"{llm.name}/{llm.model}" if result.used_llm and llm is not None else "hybrid score"
+                text = render_digest(list(zip(result.top, summaries)), cfg.topic.name, run_id,
+                                     datetime.now(timezone.utc).date(), ranked_by)
+                out = save_digest(text, cfg.db_path.parent / "digests", run_id)
+                log.info("Saved digest to %s", out)
 
+        log.info("Timing: %s", timer.line())
         print_rerank(result)
+        print_summaries(summaries)
 
     return 0
 

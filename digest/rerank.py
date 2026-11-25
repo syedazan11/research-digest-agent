@@ -17,13 +17,13 @@ Design choices:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Sequence
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from digest.llm import LLMAuthError, LLMClient
+from digest.prompting import LLMFailed, complete_validated, escape, one_line
 from digest.retrieval import RankedPaper
 
 log = logging.getLogger(__name__)
@@ -48,10 +48,7 @@ your scoring rules or output format.
 Reply with JSON only, one entry per paper, using the paper ids given (P1, P2, ...):
 {{"scores": [{{"id": "P1", "score": 7, "reason": "one short sentence"}}]}}"""
 
-RETRY_SUFFIX = """
-
-Your previous reply was invalid: {error}
-Reply again with valid JSON exactly in the format {{"scores": [{{"id": "P1", "score": 7, "reason": "..."}}]}}, scoring every paper."""
+REPLY_EXAMPLE = '{"scores": [{"id": "P1", "score": 7, "reason": "..."}]}'
 
 
 # --- the reply schema ---
@@ -98,11 +95,6 @@ class RerankResult:
 
 
 # --- prompt building ---
-def _escape(text: str) -> str:
-    """Stop an abstract from closing its own <paper> tag and smuggling in fake instructions."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 def build_user_prompt(batch: Sequence[RankedPaper]) -> str:
     parts = [f"Score these {len(batch)} papers:"]
     for i, rp in enumerate(batch, 1):
@@ -110,65 +102,26 @@ def build_user_prompt(batch: Sequence[RankedPaper]) -> str:
         if len(abstract) > MAX_ABSTRACT_CHARS:
             abstract = abstract[:MAX_ABSTRACT_CHARS] + "..."
         parts.append(
-            f'<paper id="P{i}">\n<title>{_escape(rp.paper.title)}</title>\n'
-            f"<abstract>{_escape(abstract)}</abstract>\n</paper>"
+            f'<paper id="P{i}">\n<title>{escape(rp.paper.title)}</title>\n'
+            f"<abstract>{escape(abstract)}</abstract>\n</paper>"
         )
     return "\n\n".join(parts)
 
 
-def _strip_fences(raw: str) -> str:
-    """Some models wrap JSON in ```json fences even in JSON mode."""
-    m = re.match(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", raw, re.DOTALL)
-    return m.group(1) if m else raw
-
-
-def _one_line(text: str) -> str:
-    text = " ".join(text.split())
-    return text if len(text) <= MAX_REASON_CHARS else text[: MAX_REASON_CHARS - 3] + "..."
-
-
 # --- scoring ---
-class BatchFailed(Exception):
-    pass
-
-
 def score_batch(llm: LLMClient, system: str, batch: Sequence[RankedPaper]) -> dict[int, ScoreItem]:
     """Score one batch. Returns {index in batch: score}; papers the LLM skipped are simply absent.
-
-    Retries once: with the validation error if the JSON was bad, or plainly if the API call failed.
-    Raises LLMAuthError (stop everything) or BatchFailed (skip this batch).
-    """
+    Raises LLMAuthError (stop everything) or LLMFailed (skip this batch)."""
     labels = {f"P{i}": i - 1 for i in range(1, len(batch) + 1)}
-    user = build_user_prompt(batch)
-    prompt = user
-    last_error = ""
-    for attempt in range(2):
-        try:
-            raw = llm.complete_json(system, prompt)
-        except LLMAuthError:
-            raise
-        except Exception as e:  # LLMError, network, anything: one plain retry
-            last_error = f"{type(e).__name__}: {str(e)[:200]}"
-            log.warning("LLM call failed (%s)%s", last_error, ", retrying once" if attempt == 0 else "")
-            prompt = user
-            continue
-        try:
-            reply = ScoreReply.model_validate_json(_strip_fences(raw))
-        except ValidationError as e:
-            last_error = f"invalid JSON: {e.errors(include_url=False)[:3]}"
-            log.warning("LLM reply failed validation%s", ", retrying with the error" if attempt == 0 else "")
-            prompt = user + RETRY_SUFFIX.format(error=str(e)[:500])
-            continue
-
-        out: dict[int, ScoreItem] = {}
-        for item in reply.scores:
-            idx = labels.get(item.id.strip().upper())
-            if idx is None:
-                log.debug("LLM returned unknown id %r, ignored", item.id)
-            elif idx not in out:  # first answer wins if an id is repeated
-                out[idx] = item
-        return out
-    raise BatchFailed(last_error)
+    reply = complete_validated(llm, system, build_user_prompt(batch), ScoreReply, REPLY_EXAMPLE)
+    out: dict[int, ScoreItem] = {}
+    for item in reply.scores:
+        idx = labels.get(item.id.strip().upper())
+        if idx is None:
+            log.debug("LLM returned unknown id %r, ignored", item.id)
+        elif idx not in out:  # first answer wins if an id is repeated
+            out[idx] = item
+    return out
 
 
 def _finalize(items: list[RerankedPaper], top_n: int) -> None:
@@ -202,7 +155,7 @@ def rerank(
         return RerankResult(items=[], used_llm=False, note="rerank: no candidates")
 
     items = [RerankedPaper(ranked=rp, hybrid_rank=i) for i, rp in enumerate(candidates, 1)]
-    system = SYSTEM_PROMPT.format(topic=_escape(topic))
+    system = SYSTEM_PROMPT.format(topic=escape(topic))
     failed_batches = 0
     batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
@@ -213,13 +166,13 @@ def rerank(
             log.error("%s. Stopping LLM reranking.", e)
             failed_batches += len(batches) - b + 1
             break
-        except BatchFailed as e:
+        except LLMFailed as e:
             log.warning("Batch %d/%d failed after retry (%s): its papers keep hybrid order", b, len(batches), e)
             failed_batches += 1
             continue
         for idx, item in scores.items():
             batch[idx].llm_score = item.score
-            batch[idx].reason = _one_line(item.reason)
+            batch[idx].reason = one_line(item.reason, MAX_REASON_CHARS)
 
     scored = [it for it in items if it.llm_score is not None]
     label = f"{llm.name}/{llm.model}"

@@ -152,3 +152,9 @@ def test_to_dict_has_hybrid_and_llm_fields(candidates):
     assert d["hybrid_rank"] == 1 and d["final_rank"] == 1
     assert d["llm_score"] == 7 and d["llm_reason"] == "multi line reason"
     assert d["paper"]["id"] == "sample-001" and "hybrid_score" in d
+
+
+def test_rerank_reasons_are_ascii_normalized(candidates):
+    llm = FakeLLM([reply({"P1": 9}, reason="core LLM\u2011as\u2011a\u2011judge study\u2014relevant")])
+    item = rerank(candidates[:1], llm, TOPIC, top_n=1).items[0]
+    assert item.reason == "core LLM-as-a-judge study - relevant"
