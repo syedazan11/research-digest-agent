@@ -106,7 +106,7 @@ Edit `config.yaml`:
    python -m digest.run --include-seen
    ```
    The log line `Gemini embedding API calls this run` should say **0**: every paper and the query come from the cache.
-5. Open `data/candidates/<today>.json`. This file is what Day 2 (reranking) builds on.
+5. Open `data/candidates/<date>_run<N>.json` (one file per logged run; `--dry-run` writes none). This file is what Day 2 (reranking) builds on.
 
 ### Step 6: Look inside the database (≈10 min)
 
@@ -190,7 +190,7 @@ You'll see the hybrid top 10, then a `Rerank (rerank off)` table. Drop `--no-rer
 
 ### Step 4: Real run (≈5 min)
 
-Save the Day 1 output first (`data/candidates/<date>.json` → copy it somewhere), then:
+Each logged run gets its own `data/candidates/<date>_run<N>.json`, so your Day 1 file stays. Then:
 
 ```bash
 python -m digest.run --include-seen

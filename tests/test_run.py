@@ -48,7 +48,8 @@ def test_run_with_rerank_saves_scores(setup, monkeypatch, capsys):
     assert "Rerank (rerank: fake/fake-1, 10/10 scored)" in out
     assert "fake reason" in out
 
-    cand_file = next((setup.parent / "data" / "candidates").glob("*.json"))
+    [cand_file] = (setup.parent / "data" / "candidates").glob("*.json")
+    assert cand_file.name.endswith("_run1.json")
     cands = json.loads(cand_file.read_text(encoding="utf-8"))
     assert [c["paper"]["id"] for c in cands[:2]] == ["sample-004", "sample-002"]
     assert cands[0]["final_rank"] == 1 and cands[0]["llm_score"] == 10 and cands[0]["llm_reason"]
@@ -94,3 +95,35 @@ def test_unicode_reason_does_not_crash_a_cp1252_console(setup, monkeypatch):
     assert "LLM?as?a?judge ? relevant" in console.buffer.getvalue().decode("cp1252")
     with Database(setup.parent / "data" / "test.db") as db:
         assert len(db.get_rankings(1)) == 10  # saved
+
+
+def files_under(root):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+
+
+def test_dry_run_writes_nothing_on_a_fresh_setup(setup, monkeypatch):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=score_by_title({})))
+    before = files_under(setup.parent)
+    assert run.main(args(setup, "--dry-run")) == 0
+    assert files_under(setup.parent) == before  # no DB file, no candidates file, nothing
+
+
+def test_dry_run_leaves_an_existing_db_untouched(setup, monkeypatch):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=score_by_title({})))
+    assert run.main(args(setup)) == 0  # a real run: DB + 1 candidates file
+    db_file = setup.parent / "data" / "test.db"
+    db_bytes = db_file.read_bytes()
+    before = files_under(setup.parent)
+
+    assert run.main(args(setup, "--dry-run", "--include-seen")) == 0
+    assert files_under(setup.parent) == before
+    assert db_file.read_bytes() == db_bytes
+
+
+def test_runs_on_the_same_day_never_overwrite(setup, monkeypatch):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=score_by_title({})))
+    assert run.main(args(setup)) == 0
+    assert run.main(args(setup, "--include-seen")) == 0
+    names = [p.name for p in sorted((setup.parent / "data" / "candidates").glob("*.json"))]
+    assert len(names) == 2
+    assert names[0].endswith("_run1.json") and names[1].endswith("_run2.json")

@@ -74,10 +74,22 @@ def _now() -> str:
 
 
 class Database:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, in_memory_copy: bool = False):
+        """in_memory_copy=True (used by --dry-run): work on a throwaway in-memory snapshot of the DB.
+        Reads (dedup, embedding cache) behave exactly like a real run; every write vanishes on close
+        and nothing on disk is created or changed."""
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path)
+        if in_memory_copy:
+            self.conn = sqlite3.connect(":memory:")
+            if path.exists():
+                src = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+                try:
+                    src.backup(self.conn)
+                finally:
+                    src.close()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
 

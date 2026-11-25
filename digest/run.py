@@ -80,10 +80,11 @@ def print_rerank(result: RerankResult) -> None:
             print(f"                       {_short(it.reason, 75)}")
 
 
-def save_candidates(result: RerankResult, out_dir: Path) -> Path:
-    """All candidates in final order, with hybrid and LLM fields. Later stages read this file."""
+def save_candidates(result: RerankResult, out_dir: Path, run_id: int) -> Path:
+    """All candidates in final order, with hybrid and LLM fields. Later stages read this file.
+    Named by date and run id (2026-11-25_run3.json) so two runs on the same day never overwrite."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{datetime.now(timezone.utc):%Y-%m-%d}.json"
+    path = out_dir / f"{datetime.now(timezone.utc):%Y-%m-%d}_run{run_id}.json"
     path.write_text(
         json.dumps([it.to_dict() for it in result.items], indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -135,7 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     log.info("Topic: %s", cfg.topic.name)
 
-    with Database(cfg.db_path) as db:
+    # --dry-run works on an in-memory snapshot: same reads as a real run, nothing written to disk
+    with Database(cfg.db_path, in_memory_copy=args.dry_run) as db:
         # 1. fetch
         if args.sample:
             papers = load_sample(args.sample)
@@ -168,12 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         log.info(result.note)
 
         # 5. output (saved before printing, so a console problem can never lose a paid-for run)
-        if result.items:
-            out = save_candidates(result, cfg.db_path.parent / "candidates")
-            log.info("Saved candidates to %s", out)
-
         if args.dry_run:
-            log.info("Dry run: nothing written to the database")
+            log.info("Dry run: nothing written (no database changes, no candidates file)")
         else:
             db.save_papers(new)
             run_id = db.log_run(len(papers), len(new), len(ranked), ranker.active, notes=result.note)
@@ -189,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
                 for it in result.items
             ))
             log.info("Run #%d logged. Papers in DB: %d", run_id, db.count_papers())
+            if result.items:
+                out = save_candidates(result, cfg.db_path.parent / "candidates", run_id)
+                log.info("Saved candidates to %s", out)
 
         print_rerank(result)
 
