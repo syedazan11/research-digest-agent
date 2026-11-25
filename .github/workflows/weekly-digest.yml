@@ -1,0 +1,89 @@
+name: Weekly digest
+
+on:
+  schedule:
+    # Mondays 04:15 UTC = 09:15 Pakistan time (UTC+5, no daylight saving).
+    # Minute 15, not 0: the top of the hour is GitHub's busiest time, when scheduled runs get delayed.
+    - cron: "15 4 * * 1"
+  workflow_dispatch: # "Run workflow" button in the Actions tab
+
+# Least privilege: the built-in GITHUB_TOKEN gets only these two.
+permissions:
+  contents: write # commit data/digest.db back
+  issues: write # open the digest issue, post comments, read reactions
+
+# Two runs must never overlap (both would post a digest and race to push the DB).
+# A second run waits; a run is never cancelled halfway through posting.
+concurrency:
+  group: weekly-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # a normal run takes ~2-3 min, plus Groq rate-limit waits
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # built-in token, scoped by `permissions` above
+      GITHUB_REPO: ${{ github.repository }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }} # repository secret
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Remember the last run id
+        id: before
+        run: echo "run=$(python -m digest.maintenance last-run)" >> "$GITHUB_OUTPUT"
+
+      # Reactions persist on GitHub, so reading them once right before each weekly run is enough.
+      - name: Collect last week's reactions
+        id: feedback
+        run: python -m digest.feedback
+
+      # Runs even if feedback failed: a broken feedback poll shouldn't cost a week's digest.
+      - name: Run the pipeline
+        id: pipeline
+        if: ${{ !cancelled() && steps.before.outcome == 'success' }}
+        run: python -m digest.run --strict
+
+      # Runs even if a stage failed, so whatever succeeded (feedback, run log, deliveries) is kept.
+      # The job is still marked failed afterwards, and GitHub emails you.
+      - name: Commit the database
+        if: ${{ !cancelled() && steps.before.outcome == 'success' }}
+        env:
+          BEFORE_RUN: ${{ steps.before.outputs.run }}
+        run: |
+          # Check for changes BEFORE vacuuming: VACUUM rewrites the SQLite header, so afterwards
+          # the file always differs, even when no data changed.
+          if git diff --quiet -- data/digest.db; then
+            echo "Database unchanged: nothing to commit"
+            exit 0
+          fi
+          python -m digest.maintenance vacuum
+          msg="$(python -m digest.maintenance commit-message --since "$BEFORE_RUN")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/digest.db
+          git commit -m "$msg"
+          # Someone may have pushed to main during the run. CI owns data/digest.db, so on a
+          # conflict in that file our version wins (-X theirs = the commit being replayed).
+          for attempt in 1 2 3; do
+            git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "Push failed (attempt $attempt), retrying in 10s"
+            sleep 10
+          done
+          exit 1
+
+      - name: Digest in the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          shopt -s nullglob
+          for f in data/digests/*.md; do cat "$f" >> "$GITHUB_STEP_SUMMARY"; done

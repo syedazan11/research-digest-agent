@@ -10,6 +10,8 @@ I'm a student building this for my portfolio. Explain design decisions briefly s
 
 ## Rules
 - Never read, print or commit .env
+- CI owns data/digest.db (committed by the weekly workflow). Never commit local DB changes; `git pull`
+  first, use --dry-run for experiments. Workflow env must never use real secrets in tests.yml
 - Tests must never reach real GitHub: use tests/fake_github.py (httpx.MockTransport); test_run stubs make_github
 - Keep pluggable designs: retrievers follow digest/retrieval/base.py; LLM providers are swappable via config.yaml
 - A failing API must never crash the run: log a clear warning and fall back
@@ -21,7 +23,10 @@ I'm a student building this for my portfolio. Explain design decisions briefly s
 - Day 3 done: PDF sections + summaries + Markdown digest (digest/pdf.py, summarize.py, render.py, summaries table)
 - Day 4 done: GitHub Issues delivery + reaction feedback (digest/github.py, deliver.py, feedback.py;
   digest_issues + deliveries tables). Telegram dropped: blocked in Pakistan.
-- Day 5 next: GitHub Actions (weekly run + feedback poller, commit the DB back)
+- Day 5 done: GitHub Actions. weekly-digest.yml (Mon 04:15 UTC: digest.feedback -> digest.run --strict ->
+  commit data/digest.db as github-actions[bot]) and tests.yml (no secrets). No separate feedback poller:
+  reactions persist, so they're read once before each weekly run.
+- Day 6 next: feedback learning + evals (see Eval backlog)
 
 ## Eval backlog (Day 6)
 1. LLM rerank scores bunch up. Real run #3 (2026-11-24, 19 papers): the top 5 all scored 9, so the

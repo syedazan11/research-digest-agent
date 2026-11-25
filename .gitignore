@@ -8,8 +8,14 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# local run output (the DB gets un-ignored on Day 5, when GitHub Actions commits it)
+# local run output
 data/*.db
+# ...except the real DB: GitHub Actions commits it back after every weekly run (Day 5)
+!data/digest.db
+# SQLite side files: only exist mid-write, never commit them
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
 data/candidates/
 # data/digests/ gets un-ignored on Day 7, when GitHub Pages publishes it
 data/digests/

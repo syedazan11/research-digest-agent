@@ -427,10 +427,79 @@ python -m digest.feedback
 
 ---
 
+## Day 5: Run Unattended on GitHub Actions
+
+**Goal:** every Monday morning, with nobody at the keyboard, GitHub Actions collects last week's reactions, runs the whole pipeline, posts the digest issue, and commits the updated database back to the repo. A second workflow runs the tests on every push and PR.
+
+### What's new
+
+```
+.github/workflows/
+├── weekly-digest.yml   ← Mondays 04:15 UTC (09:15 PKT) + "Run workflow" button
+└── tests.yml           ← pytest on every push / PR, no secrets
+digest/maintenance.py   ← last-run, vacuum, commit-message (the workflow's DB chores)
+data/digest.db          ← now tracked in git; CI commits it back after each run
+.gitattributes          ← LF line endings for workflows, *.db is binary
+```
+`python -m digest.run --strict` is new too: if any stage fell back (no LLM, rerank failed, no summaries, GitHub delivery failed) it exits 1 *after* saving everything, so the job fails visibly.
+
+### Design change: no separate feedback poller
+
+The original plan had a second workflow polling reactions every few hours. Not needed: **reactions persist on GitHub**, so reading them once, right before each weekly run, gives exactly the same data. One workflow instead of two, ~5 API requests a week instead of ~200, and no race between the poller and the weekly run committing the DB at the same time.
+
+### Step 1: Add the secret (≈3 min)
+
+Repo → **Settings → Secrets and variables → Actions → New repository secret**: `GROQ_API_KEY` = your Groq key. That's the only secret. GitHub delivery uses the built-in `GITHUB_TOKEN`, which the workflow limits to `contents: write` + `issues: write`.
+
+### Step 2: Merge, then run it once by hand
+
+The schedule and the "Run workflow" button only work once the workflow file is on `main`. After merging: **Actions → Weekly digest → Run workflow**. Watch the steps; the job summary shows the digest. Then check:
+- a new digest issue (labelled `digest`), and the previous one closed
+- a commit on `main` by `github-actions[bot]`: `digest: run N (5 papers, issue #M)`
+- the **Tests** workflow ran on your merge, but *not* on the bot's commit (pushes made with `GITHUB_TOKEN` never trigger other workflows: no loops)
+
+### Step 3: Pull before you work locally
+
+CI now owns `data/digest.db`. Before running anything locally: `git pull`. For experiments use `--dry-run` (writes nothing). If you changed the DB by accident: `git checkout data/digest.db`. Two copies of a binary file can't be merged; if both change, CI's wins.
+
+### Day 5 checklist
+
+- [ ] `GROQ_API_KEY` secret added
+- [ ] Tests workflow green on the PR
+- [ ] Manual "Run workflow" posts a digest issue and a bot commit
+- [ ] Both README badges show passing
+- [ ] Next Monday: a digest arrived without you doing anything
+
+### Understand it (interviewers will ask)
+
+1. **Why GitHub Actions?** Free for public repos, no server to run or patch, secrets management built in, and the logs of every run are public proof the agent runs unattended.
+2. **Why 04:15 UTC and not 04:00?** Scheduled runs are queued, and the top of the hour is GitHub's busiest time, when they get delayed. Pakistan is UTC+5 with no daylight saving, so 04:15 UTC is always 09:15 PKT.
+3. **Why `permissions: contents: write, issues: write` only?** Least privilege. If a dependency were compromised during the run, the token couldn't touch PRs, packages, deployments or settings.
+4. **What does the concurrency group do?** A manual run while the scheduled one is going would post a second digest and race to push the DB. `cancel-in-progress: false` makes the second run *wait*: cancelling a run halfway through posting comments is worse than waiting.
+5. **How do failures work?** The pipeline and commit steps use `if: !cancelled()`, so they still run after an earlier step failed. Whatever succeeded (feedback, run log, deliveries) is committed; the job is still red, and GitHub emails you. `--strict` turns quiet fallbacks into that red job, without losing the work.
+6. **Why check for DB changes before VACUUM?** I simulated the commit step against throwaway git repos: with an unchanged DB it still committed, because VACUUM rewrites the SQLite header every time. Checking `git diff` first fixed it.
+7. **Two people pushing at once?** The commit step does `git pull --rebase -X theirs` before pushing, with 3 retries. An unrelated push rebases cleanly; a conflicting `digest.db` keeps CI's copy (`theirs` = the commit being replayed, during a rebase). Both cases were simulated.
+8. **Why keep SQLite in git?** Zero infrastructure and full history for a ~140 KB file. Costs: binary (no merges), repo growth, public data. Alternatives and their costs are in the README table: cache/artifacts expire, a hosted DB adds an account and a network dependency.
+9. **Why doesn't CI use real secrets?** Tests must be reproducible and free, and PRs from forks must never see secrets. The tests use fakes for Groq, GitHub and arXiv; the workflow also blanks every key, so a missing stub fails instead of calling a real API.
+10. **Does the bot's commit trigger the tests workflow?** No. GitHub never starts workflows from pushes made with `GITHUB_TOKEN`, specifically to prevent infinite loops.
+11. **Can GitHub stop the schedule?** Yes: public repos lose scheduled workflows after 60 days without repository activity, and the bot's commits probably don't count. Mitigation: the missing Monday issue is the alarm, and re-enabling is one click. See README → Known limitations.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| No "Run workflow" button | The workflow file isn't on `main` yet. Merge first. |
+| `GROQ_API_KEY not set` / `Degraded run: LLM rerank fell back` | Add the repository secret (Step 1). |
+| `GitHub delivery failed (... 403 ...)` | Settings → Actions → General → Workflow permissions: allow the workflow to request write access, or an org policy is blocking it. |
+| `Push failed (attempt 3)` | Branch protection on `main` blocks the bot. Allow `github-actions[bot]`, or commit to a `data` branch. |
+| No digest this Monday | Check Actions: if "This scheduled workflow is disabled", click **Enable workflow** (60-day rule). If it's just late, wait: cron runs can be delayed. |
+| Local `git pull` conflicts on `data/digest.db` | `git checkout --theirs data/digest.db` (keep CI's), or discard yours with `git checkout origin/main -- data/digest.db`. |
+
+---
+
 ## Coming next
 
 | Day | Build |
 |---|---|
-| 5 | GitHub Actions: weekly `digest.run` + `digest.feedback` every few hours, commit the DB back |
 | 6 | Feedback learning: boost papers similar to your 👍 ones |
 | 7 | GitHub Pages archive, README results, demo video |
