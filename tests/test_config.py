@@ -140,3 +140,12 @@ def test_topic_validation(tmp_path, bad, match):
     p.write_text(bad, encoding="utf-8")
     with pytest.raises(ValueError, match=match):
         load_config(p)
+
+
+def test_example_config_loads_and_differs_from_mine():
+    ex = load_config(ROOT / "config.example.yaml")
+    assert [t.slug for t in ex.topics] == ["rag-evaluation", "robot-learning"]
+    assert ex.top_n(ex.topics[1]) == 3 and ex.llm.max_calls_per_run == 60
+    assert all(t.label_rubric for t in ex.topics)
+    mine = {t.slug for t in load_config(ROOT / "config.yaml").topics}
+    assert not mine & {t.slug for t in ex.topics}  # nobody copies my topics by accident

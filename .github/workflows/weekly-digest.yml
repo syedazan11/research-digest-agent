@@ -20,8 +20,15 @@ concurrency:
 
 jobs:
   digest:
+    # A fresh copy made from the template inherits this schedule. Don't post digests there until
+    # its owner has set it up: scheduled runs need the repository variable DIGEST_ENABLED=true
+    # (Settings -> Secrets and variables -> Actions -> Variables). Manual runs always work.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.repository == 'syedazan11/research-digest-agent' ||
+      vars.DIGEST_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # a normal run takes ~2-3 min, plus Groq rate-limit waits
+    timeout-minutes: 45 # ~2-3 min per topic, plus Groq rate-limit waits (8K tokens/minute free tier)
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # built-in token, scoped by `permissions` above
       GITHUB_REPO: ${{ github.repository }}

@@ -70,3 +70,82 @@ def test_commit_message_lists_every_topics_run(tmp_path, papers):
             db.save_digest_issue(run, issue)
     assert commit_message(path, since_run=before) == (
         "digest: llm-evaluation run 2 (5 papers, issue #9); ai-agents run 3 (5 papers, issue #10)")
+
+
+# --- reset (for a copy made from the template) ---
+import pytest  # noqa: E402
+
+from digest.config import load_config  # noqa: E402
+from digest.labels import LabelStore  # noqa: E402
+from digest.maintenance import PROTECTED_REPO, ResetRefused, current_repo, reset_data  # noqa: E402
+
+
+def copy_with_data(tmp_path, papers):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("topics:\n  - name: My topic\n    keywords: [k]\n"
+                        "database:\n  path: data/digest.db\n  labels_path: data/labels.db\n", encoding="utf-8")
+    cfg = load_config(cfg_path)
+    with Database(cfg.db_path, default_topic="my-topic") as db:
+        db.save_papers(papers)
+        db.log_run(10, 10, 10, ["bm25"])
+    with LabelStore(cfg.labels_path, default_topic="my-topic") as s:
+        s.add_to_pool(papers)
+        s.set_label(papers[0].id, True)
+    (tmp_path / "data" / "evals").mkdir()
+    (tmp_path / "data" / "evals" / "2026-11-26.md").write_text("someone else's results", encoding="utf-8")
+    return cfg
+
+
+def test_reset_empties_both_databases_after_backing_them_up(tmp_path, papers):
+    cfg = copy_with_data(tmp_path, papers)
+    done = reset_data(cfg, yes=True, repo="someone/their-copy")
+    with Database(cfg.db_path, default_topic="my-topic") as db:
+        assert db.count_papers() == 0 and db.conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    with LabelStore(cfg.labels_path, default_topic="my-topic") as s:
+        assert s.stats()["pool"] == 0
+    backups = sorted(p.name for p in (tmp_path / "data").glob("*.bak-reset-*"))
+    assert len(backups) == 2 and backups[0].startswith("digest.db.bak-reset-")
+    with Database(tmp_path / "data" / backups[0], default_topic="my-topic") as old:
+        assert old.count_papers() == 10  # the backup really holds the old data
+    assert not (tmp_path / "data" / "evals").exists()
+    assert any("removed evals/" in line for line in done)
+
+
+def test_reset_needs_yes(tmp_path, papers):
+    cfg = copy_with_data(tmp_path, papers)
+    with pytest.raises(ResetRefused, match="--yes"):
+        reset_data(cfg, yes=False, repo="someone/their-copy")
+    with Database(cfg.db_path, default_topic="my-topic") as db:
+        assert db.count_papers() == 10  # untouched
+
+
+@pytest.mark.parametrize("repo", [PROTECTED_REPO, "SyedAzan11/Research-Digest-Agent"])
+def test_reset_refuses_on_the_original_repo_even_with_yes(tmp_path, papers, repo):
+    cfg = copy_with_data(tmp_path, papers)
+    with pytest.raises(ResetRefused, match="original project"):
+        reset_data(cfg, yes=True, repo=repo)
+    assert not list((tmp_path / "data").glob("*.bak-reset-*"))
+
+
+def test_current_repo_from_env_or_git_remote(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/their-copy")
+    assert current_repo(tmp_path) == "someone/their-copy"
+    monkeypatch.delenv("GITHUB_REPOSITORY")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    for url in ("https://github.com/someone/their-copy.git", "git@github.com:someone/their-copy.git"):
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", url], cwd=tmp_path, check=True)
+        assert current_repo(tmp_path) == "someone/their-copy"
+
+
+def test_reset_cli(tmp_path, papers, monkeypatch, capsys):
+    cfg = copy_with_data(tmp_path, papers)
+    monkeypatch.setenv("GITHUB_REPOSITORY", PROTECTED_REPO)
+    assert main(["--config", str(tmp_path / "config.yaml"), "reset", "--yes"]) == 1
+    assert "Reset refused" in capsys.readouterr().err
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/their-copy")
+    assert main(["--config", str(tmp_path / "config.yaml"), "reset"]) == 1  # no --yes
+    assert main(["--config", str(tmp_path / "config.yaml"), "reset", "--yes"]) == 0
+    assert "Reset done" in capsys.readouterr().out

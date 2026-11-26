@@ -67,6 +67,10 @@ rerank:
   prompt_version: v1        # v1 | v2 | v3 (digest/rerank.py); v1 kept: best mean NDCG@10 in data/evals/2026-11-26.md
 
 # Stage 4: summarize the top_n papers (same LLM as rerank). Summaries are cached in the DB.
+# Groq's free tier: 1000 requests/day, 8000 tokens/minute (read from its x-ratelimit headers).
+llm:
+  max_calls_per_run: 60     # across all topics; past it, the rest falls back and the run is degraded
+
 summarize:
   enabled: true
   max_input_tokens: 3000    # per paper: abstract + intro + conclusion from the PDF
