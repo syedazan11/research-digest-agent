@@ -14,6 +14,7 @@ class TopicConfig:
     description: str
     keywords: list[str]
     categories: list[str]
+    label_rubric: str = ""  # shown on every labelling screen, so labels don't drift
 
     def ranking_query(self) -> str:
         """The text every retriever compares papers against."""
@@ -96,6 +97,7 @@ def load_config(path: str | Path) -> Config:
         description=" ".join(str(t.get("description", "")).split()),
         keywords=[str(k) for k in t.get("keywords", [])],
         categories=[str(c) for c in t.get("categories", [])],
+        label_rubric=str(t.get("label_rubric", "")).strip(),
     )
     if not topic.name:
         raise ValueError("config: topic.name is required")

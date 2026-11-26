@@ -10,6 +10,12 @@ topic:
     - evaluation benchmark
     - judge model
   categories: [cs.CL, cs.AI, cs.LG]
+  # Shown at the top of every python -m digest.label screen. Written before labelling, to stop drift.
+  label_rubric: |
+    y = the paper's MAIN contribution is about evaluating LLMs: new benchmarks, LLM-as-a-judge
+        methods or bias, evaluation metrics, auditing model behaviour
+    n = it uses an LLM or a benchmark only as a tool for something else (medicine, robotics,
+        speech...), or evaluation is a side detail
 
 fetch:
   days_back: 7

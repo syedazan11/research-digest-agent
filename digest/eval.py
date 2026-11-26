@@ -51,6 +51,7 @@ class Dataset:
     papers: list[Paper]
     relevant: dict[str, int]  # paper_id -> 0/1
     reactions: list[Example] = field(default_factory=list)
+    previous_round: dict[str, int] = field(default_factory=dict)  # last archived labelling round, if any
 
     @property
     def n_relevant(self) -> int:
@@ -226,6 +227,33 @@ def auc(scores: dict[str, float], relevant: dict[str, int]) -> float:
     return wins / (len(pos) * len(neg))
 
 
+def random_baseline(papers: Sequence[Paper], relevant: dict[str, int]) -> dict[str, float]:
+    """Expected metrics of a uniformly random ordering, exactly (no simulation).
+
+    E[P@k] = base rate; E[R@k] = k / n; E[DCG@k] = base rate * sum of discounts, divided by the ideal.
+    """
+    import math
+
+    n = len(papers)
+    n_rel = sum(relevant[p.id] for p in papers)
+    rate = n_rel / n if n else 0.0
+    ideal = sum(1 / math.log2(i + 2) for i in range(min(10, n_rel)))
+    expected_dcg = rate * sum(1 / math.log2(i + 2) for i in range(min(10, n)))
+    return {"P@5": rate, "R@20": min(20, n) / n if n else 0.0, "NDCG@10": expected_dcg / ideal if ideal else 0.0}
+
+
+def cohen_kappa(a: dict[str, int], b: dict[str, int]) -> tuple[float, int]:
+    """Agreement between two labelling rounds on the papers both labelled, corrected for chance."""
+    common = [k for k in a if k in b]
+    if not common:
+        return float("nan"), 0
+    n = len(common)
+    observed = sum(a[k] == b[k] for k in common) / n
+    pa, pb = sum(a[k] for k in common) / n, sum(b[k] for k in common) / n
+    expected = pa * pb + (1 - pa) * (1 - pb)
+    return ((observed - expected) / (1 - expected) if expected < 1 else 1.0), n
+
+
 def render_report(r: EvalResult, model_key: str, today: str) -> str:
     d = r.data
     a, b = r.folds
@@ -240,12 +268,19 @@ def render_report(r: EvalResult, model_key: str, today: str) -> str:
         "| Method | P@5 | R@20 | NDCG@10 | Notes |",
         "|---|---|---|---|---|",
     ]
+    rb = [random_baseline(half, d.relevant) for half in r.folds]
+    rm = {k: statistics.fmean(x[k] for x in rb) for k in METRICS}
+    lines.append(f"| *Random order (expected)* | {rm['P@5']:.2f} | {rm['R@20']:.2f} | {rm['NDCG@10']:.3f} | "
+                 "the bar to beat |")
     for row in r.rows:
         m = row.mean
         lines.append(f"| {row.method} | {m['P@5']:.2f} | {m['R@20']:.2f} | {m['NDCG@10']:.3f} | {row.note} |")
     lines += [
         "",
         "- R@20 is the same for every rerank row by construction: reranking only reorders BM25's top 20.",
+        *(f"- Label consistency: Cohen's kappa {k:.2f} between this round and the previous labelling round "
+          f"on {n} papers labelled in both (1 = identical, 0 = chance)."
+          for k, n in [cohen_kappa(d.relevant, d.previous_round)] if n),
         f"- Feedback weight chosen per half: {', '.join(f'{w:g}' for w in r.chosen_weights)} "
         f"(grid {', '.join(f'{w:g}' for w in r.weight_table[0])}; NDCG@10 on the choosing half: "
         + "; ".join(", ".join(f"{w:g} -> {v:.3f}" for w, v in t.items()) for t in r.weight_table) + ").",
@@ -278,6 +313,8 @@ def load_dataset(cfg: Config) -> Dataset:
 
     with LabelStore(cfg.labels_path, read_only=True) as store:
         labelled = store.labelled_papers()
+        rounds = store.conn.execute("SELECT MAX(round) FROM labels_archive").fetchone()[0]
+        previous = store.archived_labels(rounds) if rounds else {}
     reactions = []
     if cfg.db_path.exists():
         with Database(cfg.db_path, in_memory_copy=True) as db:  # never writes digest.db
@@ -285,7 +322,7 @@ def load_dataset(cfg: Config) -> Dataset:
                 paper = db.get_paper(row["paper_id"])
                 if paper is not None:
                     reactions.append(Example(paper, int(row["rating"]), "reaction"))
-    return Dataset([p for p, _ in labelled], {p.id: r for p, r in labelled}, reactions)
+    return Dataset([p for p, _ in labelled], {p.id: r for p, r in labelled}, reactions, previous)
 
 
 def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int:

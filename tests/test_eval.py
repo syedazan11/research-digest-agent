@@ -160,3 +160,42 @@ def test_main_needs_labels(tmp_path):
     cfg.write_text("topic:\n  name: T\n  keywords: [k]\ndatabase:\n  path: d.db\n  labels_path: l.db\n",
                    encoding="utf-8")
     assert ev.main(["--config", str(cfg), "--no-llm"]) == 1
+
+
+def test_random_baseline_matches_simulation(papers):
+    import random
+    import statistics
+
+    from digest.metrics import ndcg_at_k, precision_at_k
+
+    data = make_data(papers)
+    exact = ev.random_baseline(data.papers, data.relevant)
+    rng = random.Random(1)
+    ids = [p.id for p in data.papers]
+    sims = []
+    for _ in range(20000):
+        rng.shuffle(ids)
+        sims.append((precision_at_k(ids, data.relevant, 5), ndcg_at_k(ids, data.relevant, 10)))
+    assert exact["P@5"] == pytest.approx(12 / 30)
+    assert exact["P@5"] == pytest.approx(statistics.fmean(s[0] for s in sims), abs=0.01)
+    assert exact["NDCG@10"] == pytest.approx(statistics.fmean(s[1] for s in sims), abs=0.01)
+
+
+def test_cohen_kappa():
+    same = {"a": 1, "b": 0, "c": 1, "d": 0}
+    assert ev.cohen_kappa(same, same) == (1.0, 4)
+    flipped = {k: 1 - v for k, v in same.items()}
+    assert ev.cohen_kappa(same, flipped)[0] == pytest.approx(-1.0)
+    assert ev.cohen_kappa({"a": 1, "b": 0}, {"a": 1, "c": 0}) == (1.0, 1)
+    k, n = ev.cohen_kappa(same, {})
+    assert n == 0
+
+
+def test_report_shows_random_row_and_kappa(papers):
+    data = make_data(papers)
+    data.previous_round = {p.id: 1 - r for p, r in ((p, data.relevant[p.id]) for p in data.papers[:10])}
+    report = ev.render_report(ev.run_eval(data, QUERY, {}), "fake/m", "2026-11-26")
+    assert "| *Random order (expected)* | 0.40 |" in report
+    # 10 papers, 4 relevant, every label flipped: observed agreement 0, chance agreement
+    # 0.4*0.6 + 0.6*0.4 = 0.48, so kappa = (0 - 0.48) / (1 - 0.48) = -0.92
+    assert "Cohen's kappa -0.92 between this round and the previous labelling round on 10 papers" in report

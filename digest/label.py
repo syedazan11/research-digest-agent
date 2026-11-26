@@ -49,10 +49,11 @@ def read_key() -> str:
         return (input("> ").strip() or " ")[0]
 
 
-def render(paper: Paper, position: int, total: int, done: int) -> str:
+def render(paper: Paper, position: int, total: int, done: int, rubric: str = "") -> str:
     authors = ", ".join(paper.authors[:4]) + (" et al." if len(paper.authors) > 4 else "")
     lines = [
         "=" * WIDTH,
+        *([rubric, "-" * WIDTH] if rubric else []),
         f"[{position}/{total}]  labelled so far: {done}",
         "",
         *textwrap.wrap(paper.title, WIDTH),
@@ -65,7 +66,8 @@ def render(paper: Paper, position: int, total: int, done: int) -> str:
     return "\n".join(lines)
 
 
-def label_loop(store: LabelStore, key: Callable[[], str] = read_key, out: Callable[[str], None] = print) -> dict:
+def label_loop(store: LabelStore, key: Callable[[], str] = read_key, out: Callable[[str], None] = print,
+               rubric: str = "") -> dict:
     todo = store.unlabelled()
     total_pool = store.stats()["pool"]
     already = total_pool - len(todo)
@@ -77,7 +79,7 @@ def label_loop(store: LabelStore, key: Callable[[], str] = read_key, out: Callab
         return counts
     while i < len(todo):
         paper = todo[i]
-        out(render(paper, already + i + 1, total_pool, already + len(history)))
+        out(render(paper, already + i + 1, total_pool, already + len(history), rubric))
         k = (key() or " ").lower()
         if k in ("y", "n"):
             store.set_label(paper.id, k == "y")
@@ -113,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--max", type=int, default=300, help="max papers to fetch")
     ap.add_argument("--stats", action="store_true")
+    ap.add_argument("--relabel", action="store_true",
+                    help="start a fresh round: current labels move to labels_archive; pool + LLM cache stay")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")
@@ -123,12 +127,15 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
 
     with LabelStore(cfg.labels_path) as store:
+        if args.relabel:
+            rnd, n = store.archive_labels()
+            print(f"Archived {n} labels as round {rnd} (labels_archive). The pool and cached LLM scores are kept.")
         if args.fetch:
             papers = fetch_recent(cfg.topic.keywords, cfg.topic.categories, args.days, args.max)
             added = store.add_to_pool(papers)
             log.info("Label pool: %d fetched, %d new. Only data/labels.db was changed.", len(papers), added)
         elif not args.stats:
-            counts = label_loop(store)
+            counts = label_loop(store, rubric=cfg.topic.label_rubric)
             print(f"\nThis session: {counts['relevant']} relevant, {counts['not_relevant']} not, "
                   f"{counts['skipped']} skipped, {counts['undone']} undone")
         s = store.stats()

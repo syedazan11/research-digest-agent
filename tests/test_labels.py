@@ -94,3 +94,45 @@ def test_empty_pool_message(tmp_path):
     with LabelStore(tmp_path / "labels.db") as s:
         label_loop(s, keys("q"), out=shown.append)
     assert "Fetch a pool first" in shown[0]
+
+
+# --- relabelling ---
+def test_relabel_archives_labels_but_keeps_pool_and_llm_cache(tmp_path, papers):
+    s = store_with(tmp_path, papers)
+    s.set_label(papers[0].id, True)
+    s.set_label(papers[1].id, False)
+    s.put_llm_score(papers[0].id, "groq/m", "v2", 8, "r")
+
+    rnd, n = s.archive_labels()
+    assert (rnd, n) == (1, 2)
+    assert s.labels() == {} and len(s.unlabelled()) == 10  # start over...
+    assert s.stats()["pool"] == 10 and s.get_llm_scores("groq/m", "v2")  # ...with pool + cache kept
+    assert s.archived_labels(1) == {papers[0].id: 1, papers[1].id: 0}
+
+    s.set_label(papers[0].id, False)
+    assert s.archive_labels() == (2, 1)  # rounds don't overwrite each other
+    assert s.archived_labels(1)[papers[0].id] == 1 and s.archived_labels(2) == {papers[0].id: 0}
+    s.close()
+
+
+def test_rubric_is_shown_on_every_screen(tmp_path, papers):
+    s = store_with(tmp_path, papers)
+    shown = []
+    label_loop(s, keys("y", "n", "q"), out=shown.append, rubric="y = MAIN contribution is evaluation")
+    screens = [o for o in shown if o.startswith("=")]
+    assert len(screens) == 3 and all("y = MAIN contribution is evaluation" in o for o in screens)
+    s.close()
+
+
+def test_cli_relabel(tmp_path, papers, capsys):
+    from digest.label import main
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("topic:\n  name: T\n  keywords: [k]\n  label_rubric: |\n    y = yes\n"
+                   "database:\n  path: d.db\n  labels_path: labels.db\n", encoding="utf-8")
+    with LabelStore(tmp_path / "labels.db") as s:
+        s.add_to_pool(papers)
+        s.set_label(papers[0].id, True)
+    assert main(["--config", str(cfg), "--relabel", "--stats"]) == 0
+    out = capsys.readouterr().out
+    assert "Archived 1 labels as round 1" in out and "Pool 10: 0 relevant, 0 not relevant, 10 unlabelled" in out

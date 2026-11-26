@@ -35,6 +35,16 @@ CREATE TABLE IF NOT EXISTS labels (
     labelled_at  TEXT NOT NULL
 );
 
+-- Earlier labelling rounds, moved here by --relabel (kept, so rounds can be compared).
+CREATE TABLE IF NOT EXISTS labels_archive (
+    round        INTEGER NOT NULL,
+    paper_id     TEXT NOT NULL,
+    relevant     INTEGER NOT NULL,
+    labelled_at  TEXT NOT NULL,
+    archived_at  TEXT NOT NULL,
+    PRIMARY KEY (round, paper_id)
+);
+
 -- LLM rerank scores for the eval, so re-running it costs nothing. Raw score on the prompt's own scale.
 CREATE TABLE IF NOT EXISTS llm_scores (
     paper_id        TEXT NOT NULL,
@@ -118,6 +128,21 @@ class LabelStore:
     def remove_label(self, paper_id: str) -> None:
         self.conn.execute("DELETE FROM labels WHERE paper_id = ?", (paper_id,))
         self.conn.commit()
+
+    def archive_labels(self) -> tuple[int, int]:
+        """Move every current label into labels_archive as a new round. The pool and the LLM score
+        cache are untouched. Returns (round number, labels archived)."""
+        rnd = (self.conn.execute("SELECT MAX(round) FROM labels_archive").fetchone()[0] or 0) + 1
+        with self.conn:  # one transaction: either everything moves or nothing does
+            cur = self.conn.execute(
+                """INSERT INTO labels_archive (round, paper_id, relevant, labelled_at, archived_at)
+                   SELECT ?, paper_id, relevant, labelled_at, ? FROM labels""", (rnd, _now()))
+            self.conn.execute("DELETE FROM labels")
+        return rnd, cur.rowcount
+
+    def archived_labels(self, rnd: int) -> dict[str, int]:
+        rows = self.conn.execute("SELECT paper_id, relevant FROM labels_archive WHERE round = ?", (rnd,))
+        return {r["paper_id"]: r["relevant"] for r in rows}
 
     def labels(self) -> dict[str, int]:
         """paper_id -> 1 (relevant) / 0 (not)."""
