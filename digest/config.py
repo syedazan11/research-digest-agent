@@ -14,6 +14,7 @@ class TopicConfig:
     description: str
     keywords: list[str]
     categories: list[str]
+    label_rubric: str = ""  # shown on every labelling screen, so labels don't drift
 
     def ranking_query(self) -> str:
         """The text every retriever compares papers against."""
@@ -31,6 +32,7 @@ class RankingConfig:
     top_k: int = 20
     bm25_weight: float = 0.4
     embedding_weight: float = 0.6
+    feedback_weight: float = 0.0  # Rocchio feedback retriever (Day 6); 0 = off
 
 
 @dataclass
@@ -50,6 +52,7 @@ class RerankConfig:
     model: str = "openai/gpt-oss-120b"
     top_n: int = 5  # papers that make the final digest
     batch_size: int = 5  # papers per LLM call
+    prompt_version: str = "v1"  # see digest/rerank.py PROMPTS; chosen by python -m digest.eval
 
 
 @dataclass
@@ -81,6 +84,7 @@ class Config:
     rerank: RerankConfig = field(default_factory=RerankConfig)
     summarize: SummarizeConfig = field(default_factory=SummarizeConfig)
     deliver: DeliverConfig = field(default_factory=DeliverConfig)
+    labels_path: Path | None = None  # data/labels.db: your y/n labels + eval cache (you commit it, CI only reads)
 
 
 def load_config(path: str | Path) -> Config:
@@ -93,6 +97,7 @@ def load_config(path: str | Path) -> Config:
         description=" ".join(str(t.get("description", "")).split()),
         keywords=[str(k) for k in t.get("keywords", [])],
         categories=[str(c) for c in t.get("categories", [])],
+        label_rubric=str(t.get("label_rubric", "")).strip(),
     )
     if not topic.name:
         raise ValueError("config: topic.name is required")
@@ -122,7 +127,12 @@ def load_config(path: str | Path) -> Config:
         model=str(rr.get("model", "openai/gpt-oss-120b")),
         top_n=int(rr.get("top_n", 5)),
         batch_size=int(rr.get("batch_size", 5)),
+        prompt_version=str(rr.get("prompt_version", "v1")),
     )
+    from digest.rerank import PROMPTS  # local import: rerank imports retrieval, keep config light
+
+    if rerank.prompt_version not in PROMPTS:
+        raise ValueError(f"config: unknown rerank.prompt_version '{rerank.prompt_version}' (use {sorted(PROMPTS)})")
     if rerank.provider not in RERANK_PROVIDERS:
         raise ValueError(f"config: unknown rerank.provider '{rerank.provider}' (use {sorted(RERANK_PROVIDERS)})")
     if rerank.top_n < 1 or rerank.batch_size < 1:
@@ -160,10 +170,12 @@ def load_config(path: str | Path) -> Config:
             top_k=int(r.get("top_k", 20)),
             bm25_weight=float(w.get("bm25", 0.4)),
             embedding_weight=float(w.get("embedding", 0.6)),
+            feedback_weight=float(w.get("feedback", 0.0)),
         ),
         embeddings=embeddings,
         # relative to the config file, so it works no matter where you run from
         db_path=(path.parent / d.get("path", "data/digest.db")).resolve(),
+        labels_path=(path.parent / d.get("labels_path", "data/labels.db")).resolve(),
         rerank=rerank,
         summarize=summarize,
         deliver=deliver,

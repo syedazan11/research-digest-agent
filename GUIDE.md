@@ -497,9 +497,87 @@ CI now owns `data/digest.db`. Before running anything locally: `git pull`. For e
 
 ---
 
+## Day 6: Evaluation and Feedback Learning
+
+**Goal:** stop guessing. Build a hand-labelled test set, measure every ranking method on it, fix the default prompt and the feedback weight from the numbers, and learn from your 👍/👎 and labels.
+
+### What's new
+
+```
+digest/
+├── label.py / labels.py      ← python -m digest.label: y/n labelling CLI, data/labels.db
+├── metrics.py                ← Precision@k, Recall@k, NDCG@k (hand-computed tests)
+├── eval.py                   ← python -m digest.eval: 20 repeated 2-fold splits, report in data/evals/
+├── judge.py                  ← python -m digest.judge: LLM-as-judge for summary faithfulness
+└── retrieval/
+    ├── tfidf.py              ← numpy TF-IDF baseline
+    └── feedback.py           ← Rocchio FeedbackRetriever (reactions + labels, no self-leakage)
+data/labels.db                ← label pool, labels, archived rounds, cached LLM scores (you commit it)
+```
+Rerank now has prompt versions (`rerank.prompt_version`: v1 original, v2 strict rubric, v3 strict on 1-100), and production adds the feedback retriever with `ranking.weights.feedback`.
+
+### Step 1: Build the label pool and label it (≈30 min)
+
+```bash
+python -m digest.label --fetch --days 30   # one-off: ~110 papers into data/labels.db only
+python -m digest.label                     # y / n / s(kip) / u(ndo) / q(uit), saved per key
+```
+The rubric from `config.yaml` (`topic.label_rubric`) is on every screen. **Write it before you start, and take 20-30 s per paper.** Papers come in a fixed shuffled order with no score shown, so the current ranker can't anchor you.
+
+**What happened the first time (a real lesson):** 110 labels in 8.5 minutes, no written rubric. Every method, including the LLM, scored exactly at chance (AUC 0.49-0.51), and the labels contradicted 3 of my 4 👍/👎. Not a bug: I checked the label-to-paper mapping and an off-by-one shift. The labels were noise. `python -m digest.label --relabel` archived them as round 1 and I started again with a rubric. The two rounds agree only slightly (Cohen's kappa 0.16).
+
+### Step 2: Evaluate (≈1 min; the first run spends ~70 Groq calls)
+
+```bash
+python -m digest.eval        # report: data/evals/<date>.md
+```
+LLM scores are cached in `labels.db` per (paper, model, prompt version), so re-runs cost nothing.
+
+### Step 3: Read it, then decide
+
+The report has the random-order bar to beat, every method's mean ± sd over 20 splits, how often each beats BM25 on the same split, the LLM score distribution per prompt (bunching, AUC), and label consistency vs the previous round. Change a default only when the evidence is clearer than the noise.
+
+### Step 4: Summary quality (optional)
+
+```bash
+python -m digest.judge       # report: data/evals/<date>-summaries.md
+```
+
+### Day 6 checklist
+
+- [ ] Labelled with a written rubric, at a sane pace
+- [ ] `python -m digest.eval` report committed with `data/labels.db`
+- [ ] Defaults in `config.yaml` justified by the report (prompt version, feedback weight)
+- [ ] README Results section with the caveats
+
+### Understand it (interviewers will ask)
+
+1. **Why these three metrics?** P@5 is what the digest delivers (5 papers). R@20 asks whether the 20 papers sent to the LLM contained the good ones; reranking can't fix what retrieval missed. NDCG@10 rewards putting relevant papers *near the top*, so it's the one used to pick prompts.
+2. **Why is R@20 identical for every rerank row?** Reranking only reorders BM25's top 20, so the set is the same. A metric that can't move is worth saying out loud, not hiding.
+3. **Why a random baseline?** The pool comes from the keyword search, so 43% of papers are relevant before any ranking. BM25's P@5 of 0.45 sounds fine until you see random gets 0.43.
+4. **Why 20 repeated splits instead of one?** On the canonical split v3 ranked first; across 20 splits v1 did. With ~54 papers per half, one split is mostly luck. Mean ± sd plus "wins on the same split" separates signal from noise. Caveat: the splits overlap, so 20/20 isn't 20 independent experiments.
+5. **How is leakage prevented?** Two layers. Inside the retriever: when a paper that is itself a training example gets scored, its own vector is removed from the profile first (tested against retraining without it). In the eval: to report half A, the feedback model trains only on half B's labels (and 👍/👎 on papers outside A), and its weight is chosen on B. Tested with a spy on every call.
+6. **Why Rocchio and not a classifier?** ~110 examples. Rocchio has no training run, two interpretable knobs (β = 0.75 for 👍, γ = 0.25 for 👎: positives say more), handles cold start (no ratings → no effect), and plugs into the existing Retriever interface.
+7. **Why keep labels and reactions separate (`source`)?** They're different signals: a label is a deliberate judgement against a rubric; a reaction is judgement of a delivered digest. If both exist, the reaction wins. And it keeps the door open to weighting them differently.
+8. **The stricter prompt fixed bunching. Why not ship it?** Because the goal is ranking, not a nice histogram. v3 spread scores over 35 values instead of 10, but v1 still ranked at least as well (14/20 wins over v3, within one sd). The backlog item is closed with evidence, not with the prompt that looked better.
+9. **How did you pick the feedback weight?** Nested: the inner CV chose among 0.2 / 0.35 / 0.5 on the training half; 0.2 won most often (21 of 40 halves) and is the most conservative. Production normalizes weights over the active retrievers, so `feedback: 0.1` next to `bm25: 0.4` is the same 20% share; a test keeps them in step.
+10. **What's the biggest weakness of this eval?** The labels. One person, ~110 papers, kappa 0.16 between rounds. And because production now trains on them, they can't be a clean test set for the next version: a fresh held-out batch is needed first.
+11. **Why judge summaries with a different model?** Models tend to rate their own output kindly. gpt-oss writes, Qwen judges. Length rules are checked by code, because counting sentences shouldn't need an LLM. The one flagged field was confirmed by hand.
+12. **What did labelling badly teach you?** That a confident pipeline on bad labels produces confident nonsense. The sanity checks that caught it (chance-level AUC for *every* method, disagreement with my own reactions, labelling speed) are now part of the report.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `Need at least 10 labelled papers with both classes` | Label more: `python -m digest.label`. |
+| Every method at AUC ≈ 0.5 | Suspect the labels before the code: re-read the rubric, check pace, compare with your 👍/👎. `--relabel` starts a new round (the old one is archived). |
+| `vN: only k/n papers scored, left out` | A Groq outage mid-run. Re-run `python -m digest.eval`: only the missing papers are scored. |
+| Judge: `model ... does not exist` | List your Groq models; pass one with `--judge-model`. |
+
+---
+
 ## Coming next
 
 | Day | Build |
 |---|---|
-| 6 | Feedback learning: boost papers similar to your 👍 ones |
 | 7 | GitHub Pages archive, README results, demo video |

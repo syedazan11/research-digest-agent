@@ -65,7 +65,7 @@ class GroqLLM:
         api_key: str | None = None,
         client=None,  # injectable so tests can pass a fake
         max_retries: int = 3,
-        reasoning_effort: str = "low",
+        reasoning_effort: str | None = "auto",
         sleep: Callable[[float], None] = time.sleep,
     ):
         if client is None:
@@ -76,6 +76,9 @@ class GroqLLM:
         self.client = client
         self.model = model
         self.max_retries = max_retries
+        if reasoning_effort == "auto":
+            # only reasoning models (gpt-oss) accept reasoning_effort; Llama etc. reject the request
+            reasoning_effort = "low" if "gpt-oss" in model else None
         self.reasoning_effort = reasoning_effort
         self.sleep = sleep
         self.calls = 0
@@ -86,12 +89,13 @@ class GroqLLM:
         for attempt in range(self.max_retries + 1):
             try:
                 self.calls += 1
+                extra = {"reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}
                 resp = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                     response_format={"type": "json_object"},
                     temperature=0,
-                    reasoning_effort=self.reasoning_effort,
+                    **extra,
                 )
                 return resp.choices[0].message.content or ""
             except (groq.AuthenticationError, groq.PermissionDeniedError) as e:
