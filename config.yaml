@@ -1,25 +1,48 @@
-topic:
-  name: "LLM evaluation"
-  description: >
-    How to evaluate large language models and LLM applications: benchmarks,
-    LLM-as-a-judge, evaluation metrics, and measuring reliability and safety.
-  keywords:
-    - LLM evaluation
-    - LLM-as-a-judge
-    - evaluating large language models
-    - evaluation benchmark
-    - judge model
-  categories: [cs.CL, cs.AI, cs.LG]
-  # Shown at the top of every python -m digest.label screen. Written before labelling, to stop drift.
-  label_rubric: |
-    y = the paper's MAIN contribution is about evaluating LLMs: new benchmarks, LLM-as-a-judge
-        methods or bias, evaluation metrics, auditing model behaviour
-    n = it uses an LLM or a benchmark only as a tool for something else (medicine, robotics,
-        speech...), or evaluation is a side detail
+# One digest per topic. Each topic has its own "seen" papers, rankings, issues, feedback and labels.
+# topics[0] must stay "llm-evaluation": data from before multi-topic support was migrated to it.
+topics:
+  - name: "LLM evaluation"
+    slug: llm-evaluation
+    description: >
+      How to evaluate large language models and LLM applications: benchmarks,
+      LLM-as-a-judge, evaluation metrics, and measuring reliability and safety.
+    keywords:
+      - LLM evaluation
+      - LLM-as-a-judge
+      - evaluating large language models
+      - evaluation benchmark
+      - judge model
+    categories: [cs.CL, cs.AI, cs.LG]
+    # Shown at the top of every python -m digest.label screen. Written before labelling, to stop drift.
+    label_rubric: |
+      y = the paper's MAIN contribution is about evaluating LLMs: new benchmarks, LLM-as-a-judge
+          methods or bias, evaluation metrics, auditing model behaviour
+      n = it uses an LLM or a benchmark only as a tool for something else (medicine, robotics,
+          speech...), or evaluation is a side detail
+
+  - name: "AI agents"
+    slug: ai-agents
+    description: >
+      Autonomous agents built on large language models: tool use, planning, memory,
+      multi-agent collaboration, and evaluating agent reliability.
+    # Measured 2026-11-26 (7 days): 165 papers, 88% about LLMs/agentic systems. Replaced from the first
+    # draft: "agentic" alone matched 500+/week (truncated the fetch), "multi-agent" was half drones and MARL.
+    keywords:
+      - LLM agent
+      - language model agents
+      - tool use
+      - agentic system
+      - agentic workflow
+      - agentic AI
+      - multi-agent LLM
+    categories: [cs.AI, cs.CL, cs.LG, cs.MA]
+    label_rubric: |
+      y = the main contribution is about building, improving or evaluating LLM-based agents
+      n = agents are only mentioned in passing, or used as a tool for another field
 
 fetch:
   days_back: 7
-  max_results: 200
+  max_results: 300          # per topic; a warning is logged if a fetch hits it (keywords too broad)
 
 ranking:
   top_k: 20

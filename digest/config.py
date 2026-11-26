@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+_SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def slugify(name: str) -> str:
+    """'LLM evaluation' -> 'llm-evaluation'"""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 @dataclass
@@ -15,6 +23,12 @@ class TopicConfig:
     keywords: list[str]
     categories: list[str]
     label_rubric: str = ""  # shown on every labelling screen, so labels don't drift
+    slug: str = ""  # stable id used in the DB, issue labels and file names; derived from name if empty
+    top_n: int | None = None  # papers in this topic's digest; None = rerank.top_n
+
+    def __post_init__(self) -> None:
+        if not self.slug:
+            self.slug = slugify(self.name)
 
     def ranking_query(self) -> str:
         """The text every retriever compares papers against."""
@@ -75,8 +89,13 @@ class DeliverConfig:
 
 
 @dataclass
+class LLMConfig:
+    max_calls_per_run: int = 60  # across all topics; past it, remaining topics fall back (Groq free tier)
+
+
+@dataclass
 class Config:
-    topic: TopicConfig
+    topics: list[TopicConfig]
     fetch: FetchConfig
     ranking: RankingConfig
     embeddings: EmbeddingConfig
@@ -85,24 +104,62 @@ class Config:
     summarize: SummarizeConfig = field(default_factory=SummarizeConfig)
     deliver: DeliverConfig = field(default_factory=DeliverConfig)
     labels_path: Path | None = None  # data/labels.db: your y/n labels + eval cache (you commit it, CI only reads)
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    project_url: str = ""  # identifies this copy to arXiv/GitHub in the User-Agent; Actions uses the repo URL
+
+    @property
+    def topic(self) -> TopicConfig:
+        """The first topic. Existing data from before multi-topic support belongs to it."""
+        return self.topics[0]
+
+    def get_topic(self, slug: str) -> TopicConfig:
+        for t in self.topics:
+            if t.slug == slug:
+                return t
+        raise ValueError(f"unknown topic '{slug}' (have: {', '.join(t.slug for t in self.topics)})")
+
+    def top_n(self, topic: TopicConfig) -> int:
+        return topic.top_n or self.rerank.top_n
 
 
-def load_config(path: str | Path) -> Config:
-    path = Path(path)
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-    t = raw.get("topic") or {}
+def _parse_topic(t: dict, where: str) -> TopicConfig:
     topic = TopicConfig(
         name=str(t.get("name", "")).strip(),
         description=" ".join(str(t.get("description", "")).split()),
         keywords=[str(k) for k in t.get("keywords", [])],
         categories=[str(c) for c in t.get("categories", [])],
         label_rubric=str(t.get("label_rubric", "")).strip(),
+        slug=str(t.get("slug", "")).strip(),
+        top_n=int(t["top_n"]) if t.get("top_n") is not None else None,
     )
     if not topic.name:
-        raise ValueError("config: topic.name is required")
+        raise ValueError(f"config: {where}.name is required")
     if not topic.keywords and not topic.categories:
-        raise ValueError("config: give at least one topic keyword or category")
+        raise ValueError(f"config: {where} needs at least one keyword or category")
+    if not _SLUG.match(topic.slug):
+        raise ValueError(f"config: {where}.slug '{topic.slug}' must be lowercase letters, digits and dashes")
+    if topic.top_n is not None and topic.top_n < 1:
+        raise ValueError(f"config: {where}.top_n must be >= 1")
+    return topic
+
+
+def load_config(path: str | Path) -> Config:
+    path = Path(path)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+    # topics: [...] (multi-topic), or the original single topic: {...}, which still works
+    if raw.get("topics") and raw.get("topic"):
+        raise ValueError("config: use either `topic:` or `topics:`, not both")
+    if raw.get("topics"):
+        if not isinstance(raw["topics"], list):
+            raise ValueError("config: `topics:` must be a list")
+        topics = [_parse_topic(t or {}, f"topics[{i}]") for i, t in enumerate(raw["topics"])]
+    else:
+        topics = [_parse_topic(raw.get("topic") or {}, "topic")]
+    slugs = [t.slug for t in topics]
+    if len(set(slugs)) != len(slugs):
+        raise ValueError(f"config: topic slugs must be unique, got {slugs}")
+    llm = raw.get("llm") or {}
 
     f = raw.get("fetch") or {}
     r = raw.get("ranking") or {}
@@ -160,8 +217,12 @@ def load_config(path: str | Path) -> Config:
     if deliver.comment_delay_seconds < 1.0:
         raise ValueError("config: deliver.comment_delay_seconds must be >= 1 (GitHub's secondary rate limit)")
 
+    max_calls = int(llm.get("max_calls_per_run", 60))
+    if max_calls < 1:
+        raise ValueError("config: llm.max_calls_per_run must be >= 1")
+
     return Config(
-        topic=topic,
+        topics=topics,
         fetch=FetchConfig(
             days_back=int(f.get("days_back", 7)),
             max_results=int(f.get("max_results", 200)),
@@ -179,4 +240,6 @@ def load_config(path: str | Path) -> Config:
         rerank=rerank,
         summarize=summarize,
         deliver=deliver,
+        llm=LLMConfig(max_calls_per_run=max_calls),
+        project_url=str((raw.get("project") or {}).get("url", "")).strip(),
     )
