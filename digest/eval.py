@@ -18,6 +18,7 @@ The report is printed and saved to data/evals/<date>.md.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import statistics
 import sys
@@ -58,11 +59,15 @@ class Dataset:
         return sum(self.relevant.values())
 
 
-def two_folds(data: Dataset) -> tuple[list[Paper], list[Paper]]:
-    """Stratified, deterministic: alternate papers of each class between the halves."""
+def two_folds(data: Dataset, seed: int = 0) -> tuple[list[Paper], list[Paper]]:
+    """Stratified, deterministic: alternate papers of each class between the halves.
+    seed 0 is the canonical split; other seeds give other (still reproducible) splits."""
+    def key(p: Paper) -> str:
+        return shuffle_key(p.id) if seed == 0 else hashlib.sha1(f"split-{seed}:{p.id}".encode()).hexdigest()
+
     a, b = [], []
     for label in (1, 0):
-        group = sorted((p for p in data.papers if data.relevant[p.id] == label), key=lambda p: shuffle_key(p.id))
+        group = sorted((p for p in data.papers if data.relevant[p.id] == label), key=key)
         for i, p in enumerate(group):
             (a if i % 2 == 0 else b).append(p)
     return a, b
@@ -89,9 +94,11 @@ def rank_tfidf(query: str, papers: Sequence[Paper]) -> list[str]:
     return _order(papers, TfidfRetriever().score(query, papers))
 
 
-def rank_rerank(query: str, papers: Sequence[Paper], llm_scores: dict[str, float]) -> list[str]:
-    """BM25, then the top RERANK_DEPTH reordered by LLM score (ties: BM25 order); unscored keep their place."""
-    base = rank_bm25(query, papers)
+def rank_rerank(query: str, papers: Sequence[Paper], llm_scores: dict[str, float],
+                base: list[str] | None = None) -> list[str]:
+    """A base order (default BM25), then its top RERANK_DEPTH reordered by LLM score (ties: base order);
+    unscored papers keep their place after the scored ones."""
+    base = base if base is not None else rank_bm25(query, papers)
     head, tail = base[:RERANK_DEPTH], base[RERANK_DEPTH:]
     pos = {pid: i for i, pid in enumerate(head)}
     scored = sorted((pid for pid in head if pid in llm_scores), key=lambda pid: (-llm_scores[pid], pos[pid]))
@@ -166,8 +173,8 @@ class EvalResult:
 
 
 def run_eval(data: Dataset, query: str, llm_scores: dict[str, dict[str, float]],
-             weights: Sequence[float] = WEIGHT_GRID) -> EvalResult:
-    folds = two_folds(data)
+             weights: Sequence[float] = WEIGHT_GRID, seed: int = 0) -> EvalResult:
+    folds = two_folds(data, seed)
     rel = data.relevant
     rows: dict[str, Row] = {}
 
@@ -192,9 +199,79 @@ def run_eval(data: Dataset, query: str, llm_scores: dict[str, dict[str, float]],
         best_w = max(by_w, key=lambda w: (by_w[w], -w))  # ties: the smaller, more conservative weight
         chosen.append(best_w)
         weight_table.append(by_w)
-        add("BM25 + feedback (weight by 2-fold CV)", evaluate_ranking(rank_feedback(query, test, train, best_w), test_rel))
+        fb_order = rank_feedback(query, test, train, best_w)
+        add("BM25 + feedback (weight by 2-fold CV)", evaluate_ranking(fb_order, test_rel))
+        for version, scores in llm_scores.items():  # what production would run: hybrid top 20 -> LLM
+            add(f"BM25 + feedback + LLM rerank {version}",
+                evaluate_ranking(rank_rerank(query, test, scores, base=fb_order), test_rel), "production combination")
 
     return EvalResult(data, folds, list(rows.values()), llm_scores, chosen, weight_table)
+
+
+# --- repeated cross-validation: one split is too noisy to compare methods ---
+@dataclass
+class Repeated:
+    results: list[EvalResult]
+
+    def methods(self) -> list[str]:
+        return [r.method for r in self.results[0].rows]
+
+    def values(self, method: str, metric: str) -> list[float]:
+        return [next(r for r in res.rows if r.method == method).mean[metric] for res in self.results]
+
+    def summary(self, method: str, metric: str) -> tuple[float, float]:
+        v = self.values(method, metric)
+        return statistics.fmean(v), (statistics.stdev(v) if len(v) > 1 else 0.0)
+
+    def wins(self, method: str, baseline: str, metric: str = "NDCG@10") -> int:
+        """Splits where `method` beats `baseline` (ties don't count)."""
+        return sum(a > b for a, b in zip(self.values(method, metric), self.values(baseline, metric)))
+
+    def best_prompt(self) -> str | None:
+        rerank = [m for m in self.methods() if m.startswith("BM25 + LLM rerank")]
+        if not rerank:
+            return None
+        best = max(rerank, key=lambda m: (self.summary(m, "NDCG@10")[0], -int(m.split()[-1][1:])))
+        return best.split()[-1]
+
+
+def run_repeated(data: Dataset, query: str, llm_scores: dict[str, dict[str, float]], repeats: int = 20,
+                 weights: Sequence[float] = WEIGHT_GRID) -> Repeated:
+    return Repeated([run_eval(data, query, llm_scores, weights, seed) for seed in range(repeats)])
+
+
+def render_repeated(rep: Repeated, baseline: str = "BM25 (current)") -> str:
+    n = len(rep.results)
+    d = rep.results[0].data
+    rand = [statistics.fmean(random_baseline(h, d.relevant)[m] for h in res.folds) for res in rep.results
+            for m in ("NDCG@10",)]
+    rand_p5 = statistics.fmean(d.relevant[p.id] for p in d.papers)
+    notes = {r.method: r.note for r in rep.results[0].rows}
+    lines = [
+        f"## Main result: {n} repeated 2-fold splits",
+        "",
+        f"Each split is a different stratified 2-fold partition; every method is scored on both halves and "
+        f"averaged, then the {n} splits give a mean ± standard deviation. \"beats BM25\" counts the splits "
+        "where the method's NDCG@10 is higher than BM25's on the same split.",
+        "",
+        "| Method | P@5 | R@20 | NDCG@10 | beats BM25 | Notes |",
+        "|---|---|---|---|---|---|",
+        f"| *Random order (expected)* | {rand_p5:.2f} | | {statistics.fmean(rand):.3f} | | the bar to beat |",
+    ]
+    for m in rep.methods():
+        cells = []
+        for metric in METRICS:
+            mean, sd = rep.summary(m, metric)
+            cells.append(f"{mean:.2f} ± {sd:.2f}" if metric != "NDCG@10" else f"{mean:.3f} ± {sd:.3f}")
+        wins = "-" if m == baseline else f"{rep.wins(m, baseline)}/{n}"
+        lines.append(f"| {m} | {' | '.join(cells)} | {wins} | {notes.get(m, '')} |")
+    weights = Counter(w for res in rep.results for w in res.chosen_weights)
+    lines += ["", "Feedback weight chosen by the inner CV, across all halves: "
+              + ", ".join(f"{w:g} ({c}x)" for w, c in sorted(weights.items())) + ".", ""]
+    best = rep.best_prompt()
+    if best:
+        lines += [f"**Best rerank prompt by mean NDCG@10: {best}.**", ""]
+    return "\n".join(lines)
 
 
 # --- report ---
@@ -333,6 +410,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int
     ap.add_argument("--versions", nargs="*", default=list(PROMPTS), help="rerank prompt versions to compare")
     ap.add_argument("--no-llm", action="store_true", help="never call the LLM (cached scores are still used)")
     ap.add_argument("--out", help="report path (default data/evals/<date>.md)")
+    ap.add_argument("--repeats", type=int, default=20, help="random 2-fold splits for the main table")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")
@@ -369,9 +447,13 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int
     if llm is not None:
         log.info("LLM calls this eval: %d", llm.calls)
 
-    result = run_eval(data, cfg.topic.ranking_query(), scores)
+    query = cfg.topic.ranking_query()
+    rep = run_repeated(data, query, scores, repeats=max(1, args.repeats))
+    result = rep.results[0]  # the canonical split: per-half details and score distributions
     today = f"{datetime.now(timezone.utc):%Y-%m-%d}"
-    report = render_report(result, model_key, today)
+    canonical = render_report(result, model_key, today).split("\n", 2)
+    report = "\n".join([canonical[0], canonical[1], render_repeated(rep),
+                        "## Details: the canonical split", "", canonical[2]])
     out = Path(args.out) if args.out else cfg.db_path.parent / "evals" / f"{today}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")

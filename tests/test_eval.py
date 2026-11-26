@@ -92,7 +92,10 @@ def test_run_eval_rows_and_best_prompt(papers):
     result = ev.run_eval(data, QUERY, {"v1": inverted, "v2": perfect, "v3": flat})
     by = {r.method: r.mean for r in result.rows}
     assert set(by) == {"BM25 (current)", "TF-IDF", "BM25 + LLM rerank v1", "BM25 + LLM rerank v2",
-                       "BM25 + LLM rerank v3", "BM25 + feedback (weight by 2-fold CV)"}
+                       "BM25 + LLM rerank v3", "BM25 + feedback (weight by 2-fold CV)",
+                       "BM25 + feedback + LLM rerank v1", "BM25 + feedback + LLM rerank v2",
+                       "BM25 + feedback + LLM rerank v3"}
+    assert by["BM25 + feedback + LLM rerank v2"]["NDCG@10"] == pytest.approx(1.0)  # perfect LLM wins on any base
     assert by["BM25 + LLM rerank v2"]["NDCG@10"] == pytest.approx(1.0)
     assert by["BM25 + LLM rerank v1"]["NDCG@10"] < 0.5  # inverted scores push relevant papers down
     assert by["BM25 + LLM rerank v3"]["NDCG@10"] == pytest.approx(by["BM25 (current)"]["NDCG@10"])  # flat = no-op
@@ -199,3 +202,35 @@ def test_report_shows_random_row_and_kappa(papers):
     # 10 papers, 4 relevant, every label flipped: observed agreement 0, chance agreement
     # 0.4*0.6 + 0.6*0.4 = 0.48, so kappa = (0 - 0.48) / (1 - 0.48) = -0.92
     assert "Cohen's kappa -0.92 between this round and the previous labelling round on 10 papers" in report
+
+
+# --- repeated splits ---
+def test_seeded_splits_differ_but_stay_stratified_and_reproducible(papers):
+    data = make_data(papers)
+    canon = [p.id for p in ev.two_folds(data, 0)[0]]
+    s1 = [p.id for p in ev.two_folds(data, 1)[0]]
+    assert s1 != canon and s1 == [p.id for p in ev.two_folds(data, 1)[0]]
+    for seed in range(5):
+        a, b = ev.two_folds(data, seed)
+        assert sum(data.relevant[p.id] for p in a) == 6 and len(a) + len(b) == 30
+
+
+def test_rerank_on_a_custom_base_order(papers):
+    data = make_data(papers)
+    base = [p.id for p in reversed(data.papers)]
+    ranked = ev.rank_rerank(QUERY, data.papers, {base[3]: 9.0}, base=base)
+    assert ranked[0] == base[3] and ranked[20:] == base[20:]
+
+
+def test_repeated_summary_and_wins(papers):
+    data = make_data(papers)
+    perfect = {p.id: 10.0 if data.relevant[p.id] else 1.0 for p in data.papers}
+    inverted = {p.id: 1.0 if data.relevant[p.id] else 10.0 for p in data.papers}
+    rep = ev.run_repeated(data, QUERY, {"v1": inverted, "v2": perfect}, repeats=4)
+    assert len(rep.results) == 4 and rep.best_prompt() == "v2"
+    mean, sd = rep.summary("BM25 + LLM rerank v2", "NDCG@10")
+    assert mean == pytest.approx(1.0) and sd == pytest.approx(0.0)
+    assert rep.wins("BM25 + LLM rerank v1", "BM25 (current)") == 0
+    text = ev.render_repeated(rep)
+    assert "## Main result: 4 repeated 2-fold splits" in text and "| BM25 + LLM rerank v1 |" in text
+    assert "| *Random order (expected)* | 0.40 |" in text and "**Best rerank prompt by mean NDCG@10: v2.**" in text
