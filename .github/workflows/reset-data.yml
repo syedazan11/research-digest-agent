@@ -1,0 +1,59 @@
+name: Reset data
+
+# For a repo created from the template: start with empty databases, from the browser.
+# Actions -> Reset data -> Run workflow -> type RESET.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type RESET to delete this copy''s data (seen papers, runs, feedback, labels). Backups stay in git history.'
+        required: true
+
+permissions:
+  contents: write # commit the empty databases
+
+# Same group as the weekly run: a reset can never overlap a digest run.
+concurrency:
+  group: weekly-digest
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    # Never on the original project, whatever is typed. reset_data() checks this again.
+    if: github.repository != 'syedazan11/research-digest-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "RESET" ]; then
+            echo "::error::Type RESET (in capitals) to confirm. Nothing was changed."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Reset the databases
+        run: python -m digest.maintenance reset --yes
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data/
+          if git diff --cached --quiet; then
+            echo "Nothing changed"
+            exit 0
+          fi
+          git commit -m "data: reset for a fresh copy"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

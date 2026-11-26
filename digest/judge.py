@@ -162,6 +162,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None, fetche
 
     ap = argparse.ArgumentParser(description="LLM-as-judge check of cached summaries")
     ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--topic", help="topic slug from config.yaml (default: the first topic)")
     ap.add_argument("--judge-model", default=JUDGE_MODEL)
     ap.add_argument("--out", help="report path (default data/evals/<date>-summaries.md)")
     args = ap.parse_args(argv)
@@ -175,6 +176,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None, fetche
     load_dotenv()
     cfg = load_config(args.config)
     summarizer = f"{cfg.rerank.provider}/{cfg.rerank.model}"
+    tcfg = cfg.get_topic(args.topic) if args.topic else cfg.topic
 
     if make_llm is None:
         from digest.llm import make_llm
@@ -188,9 +190,9 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None, fetche
 
     results: list[Judged] = []
     try:
-        with Database(cfg.db_path, in_memory_copy=True) as db:  # read only
-            rows = db.conn.execute("SELECT * FROM summaries WHERE model = ? ORDER BY created_at",
-                                   (summarizer,)).fetchall()
+        with Database.for_config(cfg, in_memory_copy=True) as db:  # read only
+            rows = db.conn.execute("SELECT * FROM summaries WHERE model = ? AND topic = ? ORDER BY created_at",
+                                   (summarizer, tcfg.slug)).fetchall()
             for row in rows:
                 paper = db.get_paper(row["paper_id"])
                 if paper is None:
@@ -213,7 +215,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None, fetche
 
     today = f"{datetime.now(timezone.utc):%Y-%m-%d}"
     report = render(results, summarizer, f"{cfg.rerank.provider}/{args.judge_model}", today)
-    out = Path(args.out) if args.out else cfg.db_path.parent / "evals" / f"{today}-summaries.md"
+    out = Path(args.out) if args.out else cfg.db_path.parent / "evals" / f"{today}_{tcfg.slug}-summaries.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")
     print(report)

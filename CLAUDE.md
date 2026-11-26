@@ -1,12 +1,12 @@
 # Research Digest Agent
 
-Weekly arXiv digest: fetch -> dedup -> hybrid rank -> LLM rerank -> summarize -> GitHub issue -> learn from reactions.
+Weekly arXiv digest, per topic: fetch -> dedup -> hybrid rank -> LLM rerank -> summarize -> GitHub issue -> learn from reactions.
 I'm a student building this for my portfolio. Explain design decisions briefly so I can defend them in interviews.
 
 ## Run / test
 - Windows, PowerShell, venv in .venv
 - Tests: python -m pytest (must stay offline: use fake clients, never real API calls)
-- Pipeline: python -m digest.run   (offline: --sample tests/fixtures/sample_papers.json --dry-run)
+- Pipeline: python -m digest.run [--topic <slug>]   (offline: --sample tests/fixtures/sample_papers.json --dry-run)
 
 ## Rules
 - Never read, print or commit .env
@@ -14,6 +14,10 @@ I'm a student building this for my portfolio. Explain design decisions briefly s
 - CI owns data/digest.db (committed by the weekly workflow). Never commit local DB changes; `git pull`
   first, use --dry-run for experiments. Workflow env must never use real secrets in tests.yml
 - Tests must never reach real GitHub: use tests/fake_github.py (httpx.MockTransport); test_run stubs make_github
+- Everything is per topic: open DBs with Database.for_config(cfg) / LabelStore.for_config(cfg) (never guess a
+  topic for old data); pass topic slugs explicitly; topics[0] must stay llm-evaluation (migrated data)
+- Never weaken the template guards: reset refuses on syedazan11/research-digest-agent; scheduled runs on copies
+  need DIGEST_ENABLED=true; User-Agent comes from digest/identity.py
 - Keep pluggable designs: retrievers follow digest/retrieval/base.py; LLM providers are swappable via config.yaml
 - A failing API must never crash the run: log a clear warning and fall back
 - Add/update tests for every change; all tests must pass before you finish
@@ -29,7 +33,11 @@ I'm a student building this for my portfolio. Explain design decisions briefly s
   reactions persist, so they're read once before each weekly run.
 - Day 6 done: hand labels (digest/label.py, data/labels.db), eval harness (digest/eval.py, metrics.py),
   Rocchio feedback retriever (retrieval/feedback.py, tfidf.py), rerank prompt versions, summary judge (judge.py)
-- Day 7 next: GitHub Pages archive, README results polish, demo video
+- Day 7 done: multiple topics (topics: list; schema 2 in digest.db and labels.db, migrated to llm-evaluation;
+  per-topic dedup, runs, issues with topic:<slug>, feedback, summaries, labels), LLM call budget + Groq quota
+  logging, template support (config.example.yaml, maintenance reset, Reset data workflow, DIGEST_ENABLED guard).
+  Topics: llm-evaluation, ai-agents (keywords measured 2026-11-26: 165/week, 88% on-topic)
+- Later: GitHub Pages archive, demo video; label a fresh held-out batch per topic before comparing rankers
 
 ## Eval results and backlog
 - Day 6 eval (data/evals/2026-11-26.md, 108 labels, 20 repeated 2-fold splits): LLM rerank v1 is the big win

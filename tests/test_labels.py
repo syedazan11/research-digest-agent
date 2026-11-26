@@ -10,7 +10,7 @@ def keys(*seq):
 
 
 def store_with(tmp_path, papers):
-    s = LabelStore(tmp_path / "labels.db")
+    s = LabelStore(tmp_path / "labels.db", default_topic="test-topic")
     s.add_to_pool(papers)
     return s
 
@@ -32,7 +32,7 @@ def test_labels_and_resume(tmp_path, papers):
     assert s.labels() == {first: 1, second: 0}
     s.close()
 
-    s = LabelStore(tmp_path / "labels.db")  # come back later
+    s = LabelStore(tmp_path / "labels.db", default_topic="test-topic")  # come back later
     assert s.unlabelled()[0].id == third  # resumes at the first unlabelled paper
     assert s.stats() == {"pool": 10, "relevant": 1, "not_relevant": 1, "unlabelled": 8}
     s.close()
@@ -67,22 +67,22 @@ def test_labelled_papers_and_relabel(tmp_path, papers):
 
 def test_read_only_never_creates_or_changes_the_file(tmp_path, papers):
     missing = tmp_path / "nope" / "labels.db"
-    with LabelStore(missing, read_only=True) as ro:
+    with LabelStore(missing, read_only=True, default_topic="test-topic") as ro:
         assert ro.labels() == {} and ro.pool() == []
     assert not missing.parent.exists()
 
     path = tmp_path / "labels.db"
-    with LabelStore(path) as s:
+    with LabelStore(path, default_topic="test-topic") as s:
         s.add_to_pool(papers)
         s.set_label(papers[0].id, True)
     before = path.read_bytes()
-    with LabelStore(path, read_only=True) as ro:
+    with LabelStore(path, read_only=True, default_topic="test-topic") as ro:
         assert ro.labels() == {papers[0].id: 1}
     assert path.read_bytes() == before
 
 
 def test_llm_score_cache(tmp_path):
-    with LabelStore(tmp_path / "labels.db") as s:
+    with LabelStore(tmp_path / "labels.db", default_topic="test-topic") as s:
         s.put_llm_score("p1", "groq/m", "v1", 9, "good")
         s.put_llm_score("p1", "groq/m", "v2", 6, "ok")
         assert s.get_llm_scores("groq/m", "v1") == {"p1": (9.0, "good")}
@@ -91,7 +91,7 @@ def test_llm_score_cache(tmp_path):
 
 def test_empty_pool_message(tmp_path):
     shown = []
-    with LabelStore(tmp_path / "labels.db") as s:
+    with LabelStore(tmp_path / "labels.db", default_topic="test-topic") as s:
         label_loop(s, keys("q"), out=shown.append)
     assert "Fetch a pool first" in shown[0]
 
@@ -130,7 +130,7 @@ def test_cli_relabel(tmp_path, papers, capsys):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("topic:\n  name: T\n  keywords: [k]\n  label_rubric: |\n    y = yes\n"
                    "database:\n  path: d.db\n  labels_path: labels.db\n", encoding="utf-8")
-    with LabelStore(tmp_path / "labels.db") as s:
+    with LabelStore(tmp_path / "labels.db", default_topic="t") as s:
         s.add_to_pool(papers)
         s.set_label(papers[0].id, True)
     assert main(["--config", str(cfg), "--relabel", "--stats"]) == 0
@@ -139,6 +139,73 @@ def test_cli_relabel(tmp_path, papers, capsys):
 
     assert main(["--config", str(cfg), "--relabel", "--stats"]) == 0  # again, with nothing labelled
     assert "Nothing to archive" in capsys.readouterr().out
-    with LabelStore(tmp_path / "labels.db") as s:
+    with LabelStore(tmp_path / "labels.db", default_topic="t") as s:
         rounds = s.conn.execute("SELECT DISTINCT round FROM labels_archive").fetchall()
     assert [r[0] for r in rounds] == [1]  # no empty round 2
+
+
+# --- schema 1 (single topic) -> 2 ---
+import sqlite3  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+LABELS_V1 = (Path(__file__).parent / "fixtures" / "labels_schema_v1.sql").read_text(encoding="utf-8")
+
+
+def make_labels_v1(path, papers):
+    c = sqlite3.connect(path)
+    c.executescript(LABELS_V1)
+    import json
+    for p in papers[:4]:
+        c.execute("INSERT INTO label_pool VALUES (?, ?, ?, '2026-11-26')",
+                  (p.id, json.dumps(p.to_dict()), shuffle_key(p.id)))
+    c.execute("INSERT INTO labels VALUES (?, 1, '2026-11-26')", (papers[0].id,))
+    c.execute("INSERT INTO labels VALUES (?, 0, '2026-11-26')", (papers[1].id,))
+    c.execute("INSERT INTO labels_archive VALUES (1, ?, 0, '2026-11-25', '2026-11-26')", (papers[0].id,))
+    c.execute("INSERT INTO llm_scores VALUES (?, 'groq/m', 'v1', 9, 'r', '2026-11-26')", (papers[0].id,))
+    c.commit()
+    c.close()
+
+
+def test_labels_migration_moves_everything_to_the_first_topic(tmp_path, papers):
+    path = tmp_path / "labels.db"
+    make_labels_v1(path, papers)
+    with LabelStore(path, default_topic="llm-evaluation") as s:
+        assert s.stats("llm-evaluation") == {"pool": 4, "relevant": 1, "not_relevant": 1, "unlabelled": 2}
+        assert s.archived_labels(1, "llm-evaluation") == {papers[0].id: 0}
+        assert s.get_llm_scores("groq/m", "v1", "llm-evaluation") == {papers[0].id: (9.0, "r")}
+        assert s.stats("ai-agents")["pool"] == 0  # other topics start empty
+    assert (tmp_path / "labels.db.bak-schema1").exists()
+    with LabelStore(path, default_topic="whatever") as s:  # idempotent
+        assert s.stats("llm-evaluation")["relevant"] == 1
+
+
+def test_read_only_open_of_an_old_file_migrates_in_memory_only(tmp_path, papers):
+    path = tmp_path / "labels.db"
+    make_labels_v1(path, papers)
+    raw = path.read_bytes()
+    with LabelStore(path, read_only=True, default_topic="llm-evaluation") as s:  # what CI does
+        assert s.labels("llm-evaluation") == {papers[0].id: 1, papers[1].id: 0}
+    assert path.read_bytes() == raw and not (tmp_path / "labels.db.bak-schema1").exists()
+
+
+def test_old_labels_without_a_topic_are_refused(tmp_path, papers):
+    path = tmp_path / "labels.db"
+    make_labels_v1(path, papers)
+    with pytest.raises(ValueError, match="before multi-topic"):
+        LabelStore(path)
+
+
+def test_labels_are_per_topic(tmp_path, papers):
+    with LabelStore(tmp_path / "labels.db") as s:
+        s.add_to_pool(papers[:3], topic="a")
+        s.add_to_pool(papers[:2], topic="b")
+        s.set_label(papers[0].id, True, topic="a")
+        s.set_label(papers[0].id, False, topic="b")  # same paper, different judgement per topic
+        assert s.labels("a") == {papers[0].id: 1} and s.labels("b") == {papers[0].id: 0}
+        assert s.archive_labels("a") == (1, 1)
+        assert s.labels("a") == {} and s.labels("b") == {papers[0].id: 0}  # archiving a leaves b alone
+        assert s.archive_labels("b") == (1, 1)  # rounds are numbered per topic
+        s.put_llm_score(papers[0].id, "m", "v1", 8, "", topic="a")
+        assert s.get_llm_scores("m", "v1", "b") == {}

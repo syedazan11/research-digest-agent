@@ -19,7 +19,7 @@ from typing import Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from digest.db import Database
-from digest.llm import LLMAuthError, LLMClient
+from digest.llm import LLMAuthError, LLMBudgetExceeded, LLMClient
 from digest.models import Paper
 from digest.pdf import CHARS_PER_TOKEN, PdfFetcher, get_paper_text
 from digest.prompting import LLMFailed, complete_validated, escape, parse_json_model
@@ -80,17 +80,18 @@ def build_user_prompt(paper: Paper, text: str, source: str) -> str:
 
 class Summarizer:
     def __init__(self, llm: LLMClient | None, db: Database, fetcher: PdfFetcher, topic: str,
-                 model_key: str, max_input_tokens: int = 3000):
+                 model_key: str, max_input_tokens: int = 3000, topic_slug: str | None = None):
         self.llm = llm  # None = no key: cached summaries are still served
         self.db = db
         self.fetcher = fetcher
         self.system = SYSTEM_PROMPT.format(topic=escape(topic))
         self.model_key = model_key  # "provider/model", the cache key
+        self.topic_slug = topic_slug  # summaries are cached per topic: why_it_matters depends on it
         self.max_input_tokens = max_input_tokens
         self.cache_hits = 0
 
     def _from_cache(self, paper: Paper) -> PaperSummary | None:
-        row = self.db.get_summary(paper.id, self.model_key)
+        row = self.db.get_summary(paper.id, self.model_key, self.topic_slug)
         if row is None:
             return None
         try:
@@ -121,7 +122,7 @@ class Summarizer:
                                              Summary, REPLY_EXAMPLE)
             except LLMAuthError as e:
                 log.error("%s. Stopping summaries; remaining papers show their abstract.", e)
-                stop_reason = "LLM auth failed"
+                stop_reason = "LLM unavailable" if not isinstance(e, LLMBudgetExceeded) else "LLM budget used up"
                 out.append(PaperSummary(paper, None, pt.source, pt.fallback_reason, error=stop_reason))
                 continue
             except LLMFailed as e:
@@ -129,6 +130,7 @@ class Summarizer:
                 out.append(PaperSummary(paper, None, pt.source, pt.fallback_reason, error=str(e)[:200]))
                 continue  # failures are not cached, so the next run tries again
 
-            self.db.put_summary(paper.id, self.model_key, summary.model_dump_json(), pt.source, pt.fallback_reason)
+            self.db.put_summary(paper.id, self.model_key, summary.model_dump_json(), pt.source, pt.fallback_reason,
+                                topic=self.topic_slug)
             out.append(PaperSummary(paper, summary, pt.source, pt.fallback_reason))
         return out

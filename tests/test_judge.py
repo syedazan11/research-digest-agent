@@ -65,7 +65,7 @@ def test_main_judges_cached_summaries(tmp_path, papers):
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text("topic:\n  name: T\n  keywords: [k]\ndatabase:\n  path: data/digest.db\n", encoding="utf-8")
-    with Database(tmp_path / "data" / "digest.db") as db:
+    with Database(tmp_path / "data" / "digest.db", default_topic="t") as db:
         db.save_papers(papers[:2])
         for p in papers[:2]:  # sample papers have no PDF link, so both are abstract-based
             db.put_summary(p.id, "groq/openai/gpt-oss-120b", GOOD.model_dump_json(), "abstract", "download_failed")

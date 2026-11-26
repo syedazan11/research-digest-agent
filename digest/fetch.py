@@ -68,13 +68,21 @@ def fetch_recent(
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
     papers: dict[str, Paper] = {}
+    reached_cutoff = False
+    seen = 0
     for r in client.results(search):
+        seen += 1
         if r.published < cutoff:
+            reached_cutoff = True
             break  # results are sorted newest first, so everything after is older
         p = _to_paper(r)
         papers.setdefault(p.id, p)
 
     log.info("Fetched %d papers from the last %d days", len(papers), days_back)
+    if not reached_cutoff and seen >= max_results:
+        # arXiv returns newest first, so hitting the cap means the oldest part of the window was cut off
+        log.warning("Fetch hit max_results=%d before reaching %d days back: the oldest papers of the window "
+                    "were dropped. Tighten the keywords or raise fetch.max_results.", max_results, days_back)
     return list(papers.values())
 
 

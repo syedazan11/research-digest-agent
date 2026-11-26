@@ -16,12 +16,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from digest.identity import user_agent
 from digest.models import Paper
 
 log = logging.getLogger(__name__)
 
 PDF_URL = "https://export.arxiv.org/pdf/{id}"  # export.* is arXiv's mirror for programmatic access
-USER_AGENT = "research-digest-agent/0.1 (+https://github.com/syedazan11/research-digest-agent)"
+USER_AGENT = user_agent()  # see digest/identity.py: never claims to be another copy
 MAX_PDF_BYTES = 25 * 1024 * 1024
 CHARS_PER_TOKEN = 4  # rough average for English; good enough for a budget, no tokenizer needed
 MIN_TEXT_CHARS = 500  # less than this from a whole PDF = scanned images, not text
@@ -84,13 +85,14 @@ class PdfFetcher:
         self.throttle = throttle or Throttle(delay_seconds)
         self.timeout = timeout
         self.downloads = 0
+        self.text_cache: dict[str, PaperText] = {}  # paper id -> extracted text, shared across topics
         self._client = None
 
     def _http_get(self, url: str) -> bytes:
         import httpx
 
         if self._client is None:
-            self._client = httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=self.timeout,
+            self._client = httpx.Client(headers={"User-Agent": user_agent()}, timeout=self.timeout,
                                         follow_redirects=True)
         with self._client.stream("GET", url) as resp:
             resp.raise_for_status()
@@ -237,7 +239,15 @@ def build_text(paper: Paper, data: bytes, max_tokens: int = 3000) -> PaperText:
 
 
 def get_paper_text(paper: Paper, fetcher: PdfFetcher, max_tokens: int = 3000) -> PaperText:
-    """Download + extract, never raising: any failure gives the abstract with a reason, logged."""
+    """Download + extract, never raising: any failure gives the abstract with a reason, logged.
+    Cached on the fetcher, so a paper selected by two topics in one run is downloaded once."""
+    key = f"{paper.id}:{max_tokens}"
+    if key not in fetcher.text_cache:
+        fetcher.text_cache[key] = _get_paper_text(paper, fetcher, max_tokens)
+    return fetcher.text_cache[key]
+
+
+def _get_paper_text(paper: Paper, fetcher: PdfFetcher, max_tokens: int) -> PaperText:
     if not paper.pdf_url:  # e.g. sample/offline papers: don't hit the network at all
         result = abstract_only(paper, DOWNLOAD_FAILED)
         log.warning("No PDF link for %s (%s): using the abstract", paper.id, DOWNLOAD_FAILED)

@@ -1,0 +1,89 @@
+# Example config for your own copy. Copy it over config.yaml and edit the topics:
+#   cp config.example.yaml config.yaml          (Windows: copy config.example.yaml config.yaml)
+# Everything except `topics` can stay as it is.
+
+# One digest (one GitHub issue) per topic per week. Each topic has its own "seen" papers,
+# rankings, feedback and labels; a paper can show up in two topics' digests.
+topics:
+  - name: "RAG evaluation"          # shown in issue titles
+    slug: rag-evaluation            # stable id: DB, issue label topic:<slug>, file names. Don't rename later.
+    description: >                  # what you care about, in plain words. The LLM ranks against this.
+      Evaluating retrieval-augmented generation: faithfulness, hallucination detection,
+      retrieval quality, and benchmarks for RAG systems.
+    keywords:                       # arXiv must match one in the title or abstract.
+      - retrieval-augmented generation
+      - RAG evaluation
+      - hallucination detection
+      - faithfulness
+    # Tip: check a week's volume first. A fetch that hits fetch.max_results logs a warning:
+    # a single broad word ("agentic", "LLM") can match 500+ papers a week.
+    categories: [cs.CL, cs.IR, cs.AI]   # https://arxiv.org/category_taxonomy
+    # Shown while you label papers (python -m digest.label). Write it before labelling.
+    label_rubric: |
+      y = the main contribution is about evaluating RAG systems
+      n = RAG is only used as a tool, or evaluation is a side detail
+    # top_n: 5                      # papers in this topic's digest (default: rerank.top_n)
+
+  - name: "Robot learning"
+    slug: robot-learning
+    description: >
+      Learning-based robotics: manipulation, locomotion, sim-to-real transfer,
+      and foundation models for robots.
+    keywords:
+      - robot learning
+      - robotic manipulation
+      - sim-to-real
+    categories: [cs.RO, cs.LG]
+    label_rubric: |
+      y = the main contribution is a learning method or benchmark for robots
+      n = robots are only an application example
+    top_n: 3
+
+# Identifies your copy to arXiv and GitHub (User-Agent). In GitHub Actions your repo URL is used
+# automatically, so this is only needed for local runs.
+# project:
+#   url: https://github.com/YOUR-USERNAME/YOUR-REPO
+
+fetch:
+  days_back: 7
+  max_results: 300          # per topic
+
+ranking:
+  top_k: 20                 # candidates sent to the LLM rerank
+  weights:
+    bm25: 0.4
+    embedding: 0.6          # only used when embeddings.provider is gemini
+    feedback: 0.1           # learning from your 👍/👎 and labels: 0.1/(0.4+0.1) = a 20% share
+
+embeddings:
+  provider: none            # none | gemini (needs GEMINI_API_KEY)
+  model: gemini-embedding-001
+  dimensions: 768
+
+rerank:
+  enabled: true
+  provider: groq            # groq | gemini  (secret: GROQ_API_KEY / GEMINI_API_KEY)
+  model: openai/gpt-oss-120b
+  top_n: 5
+  batch_size: 5
+  prompt_version: v1
+
+# Groq's free tier: 1000 requests/day, 8000 tokens/minute. A topic costs ~10-17 calls a week.
+llm:
+  max_calls_per_run: 60     # across all topics; past it, the rest falls back and the run is degraded
+
+summarize:
+  enabled: true
+  max_input_tokens: 3000
+  pdf_delay_seconds: 3
+
+deliver:
+  provider: github          # github | none
+  close_previous: true
+  comment_delay_seconds: 1
+  feedback_days: 30
+  feedback_users: []        # whose reactions count; empty = the repo owner
+
+database:
+  path: data/digest.db
+  labels_path: data/labels.db

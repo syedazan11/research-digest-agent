@@ -46,12 +46,12 @@ def test_in_memory_copy_reads_disk_but_never_writes(tmp_path, papers):
     from digest.db import Database
 
     path = tmp_path / "real.db"
-    with Database(path) as real:
+    with Database(path, default_topic="test-topic") as real:
         real.save_papers(papers[:3])
         real.put_embedding("p1", "m", 3, np.array([1, 2, 3], dtype=np.float32))
     disk = path.read_bytes()
 
-    with Database(path, in_memory_copy=True) as dry:
+    with Database(path, in_memory_copy=True, default_topic="test-topic") as dry:
         assert dry.count_papers() == 3  # sees what's on disk (dedup still works)
         assert dry.get_embedding("p1", "m", 3) is not None  # cache hits still work
         dry.save_papers(papers)
@@ -60,6 +60,6 @@ def test_in_memory_copy_reads_disk_but_never_writes(tmp_path, papers):
     assert path.read_bytes() == disk  # file untouched
 
     missing = tmp_path / "sub" / "none.db"
-    with Database(missing, in_memory_copy=True) as dry:
+    with Database(missing, in_memory_copy=True, default_topic="test-topic") as dry:
         assert dry.count_papers() == 0
     assert not missing.parent.exists()  # not even the folder is created

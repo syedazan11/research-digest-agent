@@ -28,7 +28,12 @@ class LLMError(RuntimeError):
 
 
 class LLMAuthError(LLMError):
-    """The API key was rejected. Every further call would fail the same way, so callers stop early."""
+    """Every further call this run would fail the same way, so callers stop early and fall back.
+    Raised for a rejected API key, and (as LLMBudgetExceeded) when the run's call budget is used up."""
+
+
+class LLMBudgetExceeded(LLMAuthError):
+    """The per-run call budget (llm.max_calls_per_run) is used up: remaining work falls back."""
 
 
 class LLMClient(Protocol):
@@ -82,6 +87,20 @@ class GroqLLM:
         self.reasoning_effort = reasoning_effort
         self.sleep = sleep
         self.calls = 0
+        self.rate_limits: dict[str, str] = {}  # latest x-ratelimit-* headers from Groq
+
+    def _create(self, **kwargs):
+        """The request, via the SDK's raw-response API when available, to keep Groq's quota headers."""
+        completions = self.client.chat.completions
+        raw_api = getattr(completions, "with_raw_response", None)
+        if raw_api is None:  # test fakes
+            return completions.create(**kwargs)
+        raw = raw_api.create(**kwargs)
+        try:
+            self.rate_limits = {k.lower(): v for k, v in raw.headers.items() if k.lower().startswith("x-ratelimit-")}
+        except Exception:  # headers are a nice-to-have, never a reason to fail a call
+            pass
+        return raw.parse()
 
     def complete_json(self, system: str, user: str) -> str:
         import groq
@@ -90,7 +109,7 @@ class GroqLLM:
             try:
                 self.calls += 1
                 extra = {"reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}
-                resp = self.client.chat.completions.create(
+                resp = self._create(
                     model=self.model,
                     messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                     response_format={"type": "json_object"},
@@ -159,6 +178,57 @@ class GeminiLLM:
                     continue
                 raise LLMError(f"Gemini API error {e.code}: {str(e)[:300]}") from e
         raise LLMError("Gemini: no response")
+
+
+class BudgetedLLM:
+    """Wraps an LLMClient with a per-run call budget shared by every topic and stage.
+
+    Groq's free tier has per-minute and per-day limits; with several topics a bad week (many 429
+    retries) could burn the day's quota. Past the budget, calls raise LLMBudgetExceeded, which
+    rerank/summarize treat like an unavailable LLM: they fall back and the run is marked degraded.
+    """
+
+    def __init__(self, inner: LLMClient, max_calls: int):
+        self.inner = inner
+        self.max_calls = max_calls
+
+    @property
+    def name(self) -> str:
+        return self.inner.name
+
+    @property
+    def model(self) -> str:
+        return self.inner.model
+
+    @property
+    def calls(self) -> int:
+        return self.inner.calls
+
+    @property
+    def rate_limits(self) -> dict[str, str]:
+        return getattr(self.inner, "rate_limits", {})
+
+    @property
+    def exhausted(self) -> bool:
+        return self.inner.calls >= self.max_calls
+
+    def complete_json(self, system: str, user: str) -> str:
+        if self.exhausted:
+            raise LLMBudgetExceeded(f"LLM budget of {self.max_calls} calls per run used up (llm.max_calls_per_run)")
+        return self.inner.complete_json(system, user)
+
+
+def describe_rate_limits(limits: dict[str, str]) -> str:
+    """'requests 980/1000 left today (resets 1m26s), tokens 6400/8000 left this minute' from Groq headers."""
+    if not limits:
+        return ""
+    parts = []
+    for kind, window in (("requests", "today"), ("tokens", "this minute")):
+        left, cap = limits.get(f"x-ratelimit-remaining-{kind}"), limits.get(f"x-ratelimit-limit-{kind}")
+        if left is not None and cap is not None:
+            reset = limits.get(f"x-ratelimit-reset-{kind}")
+            parts.append(f"{kind} {left}/{cap} left {window}" + (f" (resets {reset})" if reset else ""))
+    return ", ".join(parts)
 
 
 PROVIDERS = {"groq": GroqLLM, "gemini": GeminiLLM}

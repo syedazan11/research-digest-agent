@@ -94,7 +94,7 @@ def test_load_examples_merges_reactions_and_labels_read_only(tmp_path, db, paper
     db.save_papers([a, b])
     db.upsert_feedback(a.id, -1, 111, "2026-11-25T00:00:00Z")  # 👎 on a
     path = tmp_path / "labels.db"
-    with LabelStore(path) as s:
+    with LabelStore(path, default_topic="test-topic") as s:
         s.add_to_pool([a, c])
         s.set_label(a.id, True)  # label says relevant, but the reaction wins
         s.set_label(c.id, True)

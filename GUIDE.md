@@ -576,6 +576,88 @@ python -m digest.judge       # report: data/evals/<date>-summaries.md
 
 ---
 
+## Day 7: Multiple Topics, and "Use It Yourself"
+
+**Goal:** follow several research topics with one agent (each topic its own digest, dedup, feedback and labels), without losing any existing data, and make the repo something anyone can copy and run in five minutes.
+
+### What's new
+
+```
+config.yaml            ← topics: [...] (the old single topic: still works)
+config.example.yaml    ← commented two-topic starting point for your own copy
+digest/
+├── db.py              ← schema 2: topic_papers (per-topic "seen"), topic on runs/issues/feedback/summaries
+├── labels.py          ← schema 2: pool, labels, rounds, LLM cache per topic
+├── run.py             ← loops over topics; --topic <slug>; one topic failing doesn't stop the others
+├── llm.py             ← BudgetedLLM (llm.max_calls_per_run), Groq quota from x-ratelimit headers
+├── identity.py        ← User-Agent from project.url / GITHUB_REPOSITORY, never another copy's
+└── maintenance.py     ← reset --yes (refuses on the original repo)
+.github/workflows/reset-data.yml   ← "Reset data" button for a fresh copy (type RESET)
+```
+
+### Step 1: Add a topic (≈10 min)
+
+Add an entry to `topics:` in `config.yaml`: `name`, `slug` (stable, never rename it), `description`, `keywords`, `categories`, `label_rubric`, and optionally `top_n`. **Keep `llm-evaluation` first**: data from before multi-topic support was migrated to `topics[0]`.
+
+Then check the keywords against a real week before trusting them:
+```bash
+python -m digest.run --topic ai-agents --dry-run --no-summarize
+```
+Look for `N fetched` and any `Fetch hit max_results` warning. The first draft for *AI agents* hit the 200 cap: `agentic` alone matched 500+ papers a week, and `multi-agent` was half drones and multi-agent RL. `agentic system` / `agentic workflow` / `agentic AI` / `multi-agent LLM` brought it to 165 papers, 88% about LLMs or agentic systems.
+
+### Step 2: The migration (automatic)
+
+The first run on the new code migrates both databases once:
+- `data/digest.db`: CI migrates it on the next Monday run and commits it (git history is the backup).
+- `data/labels.db`: already migrated and committed in this branch, because CI only ever opens it read-only.
+
+Every existing row (23 papers, 5 runs, 6 summaries, 4 ratings, 108 labels, 333 cached scores) moved to `llm-evaluation`; row counts were checked table by table, and the Day 6 eval reproduces exactly from the migrated labels.
+
+### Step 3: Run both topics
+
+```bash
+python -m digest.run --dry-run       # both topics, nothing written or posted
+```
+Each topic ends with a line like `Topic ai-agents: ok, 5 papers, LLM calls 18 (rerank 8, summarize 10), 141s`, then `LLM calls this run: 30 of a 60 budget | Groq quota: requests 983/1000 left today, tokens 68/8000 left this minute`.
+
+### Step 4 (optional): make it a template
+
+Settings → General → tick **Template repository**. The README's "Use it yourself in 5 minutes" section is the whole setup for someone else.
+
+### Day 7 checklist
+
+- [ ] `python -m pytest` passes
+- [ ] A dry run of both topics, with no `Fetch hit max_results` warning
+- [ ] Next Monday: one issue per topic, each labelled `topic:<slug>`, and the bot's commit lists both runs
+- [ ] (Template) "Reset data" refuses on your repo and works on a test copy
+
+### Understand it (interviewers will ask)
+
+1. **Why is dedup per topic?** "Seen" means "already shown in *this* digest". A paper about evaluating agents belongs in both an LLM-evaluation and an AI-agents digest; global dedup would let whichever topic runs first steal it.
+2. **Why summaries per (paper, model, topic)?** `why_it_matters` is written relative to the topic. The same paper matters for different reasons to an evaluation researcher and an agents researcher. The PDF text is shared (downloaded once per run); the summary isn't.
+3. **How did you migrate without losing data?** A schema version (`PRAGMA user_version`), one transaction for the whole migration, a `.bak` copy first, and every old row moved to `topics[0]`. SQLite can't change a primary key, so `summaries` and every `labels.db` table were rebuilt. Tested on the exact Day-6 schema (copied from `main`), including a simulated failure halfway (rolled back cleanly, migrated fine next time), and on a copy of the real database: all 7 tables kept their row counts.
+4. **What if a tool opens the old database without saying which topic?** It refuses with a clear error instead of guessing. Silently tagging your data as a "default" topic would be a bug you'd find months later.
+5. **Why does CI migrate `digest.db` but not `labels.db`?** CI owns `digest.db` and commits it; `labels.db` is yours and CI opens it read-only. So `labels.db` is migrated locally and committed in the PR, and if CI ever met an old file it migrates an in-memory copy instead of writing.
+6. **What happens if one topic crashes?** The exception is logged with the topic's slug, the loop moves on, and the other topics still get their digest. `--strict` then fails the job at the end so GitHub emails you; a run where *every* topic failed exits 1 even without it.
+7. **How do you stay inside Groq's free tier?** Measured, not guessed: Groq's `x-ratelimit-*` headers say 1000 requests/day and 8000 tokens/minute. Two topics use ~30 calls (3% of the day); the per-minute token window is what slows runs down, and the existing retry-after handling waits for it. A shared `BudgetedLLM` caps calls per run (60) so a bad week can't burn the day; past it, the remaining work falls back and the run is marked degraded.
+8. **Why one arXiv client and one PDF fetcher for all topics?** arXiv asks for one request every 3 seconds. Separate clients per topic would each respect it and together break it.
+9. **How do you keep a template copy from doing damage?** Three guards. Reset refuses without `--yes` and always on the original repo (checked from `GITHUB_REPOSITORY` and the git remote). A fresh copy's Monday schedule does nothing until its owner sets `DIGEST_ENABLED=true`, so it never posts digests about *my* topics. And the User-Agent comes from the copy's own repo, so it never claims to be mine.
+10. **Why a browser-only reset workflow?** The person copying the template may not have Python installed. "Type RESET" makes it deliberate; sharing the weekly run's concurrency group means it can never run during a digest.
+11. **How does feedback stay per topic?** A reaction is tagged with the topic of the issue it was left on (`deliveries` → `runs.topic`), and each topic's `FeedbackRetriever` trains only on that topic's reactions and labels. The dry run showed it: llm-evaluation trained on 108 examples, ai-agents on 0.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `This database is from before multi-topic support...` | A tool opened `digest.db` without a topic. Use `Database.for_config(cfg)`. |
+| `Fetch hit max_results=300` | A keyword is too broad. Measure each keyword alone (see Step 1) and replace it with a phrase. |
+| `LLM budget of 60 calls per run used up` | Too many topics for one run, or a lot of retries. Raise `llm.max_calls_per_run` or drop a topic. |
+| `Topic X failed` but the job is green | That's the non-strict mode. CI uses `--strict`, so there it's red. Check the logged traceback. |
+| A copy's Monday run does nothing | Set the repository variable `DIGEST_ENABLED=true`. |
+| `Reset refused: ... original project` | You're on syedazan11/research-digest-agent. Reset is only for copies. |
+
+---
+
 ## Coming next
 
 | Day | Build |

@@ -21,17 +21,18 @@ def cfg():
     return load_config(ROOT / "config.yaml")  # topic "LLM evaluation", rerank groq/openai/gpt-oss-120b
 
 
-def seed(db, cfg, papers, n=3, run_id=None):
+def seed(db, cfg, papers, n=3, run_id=None, topic=None):
     """Save a run that selected the first n sample papers, with summaries for all but the last."""
-    db.save_papers(papers)
-    rid = db.log_run(len(papers), len(papers), 10, ["bm25"], notes="test")
+    topic = topic or cfg.topic.slug
+    db.save_papers(papers, topic=topic)
+    rid = db.log_run(len(papers), len(papers), 10, ["bm25"], notes="test", topic=topic)
     assert run_id is None or rid == run_id
     rows = [{"paper_id": p.id, "hybrid_rank": i + 2, "hybrid_score": 0.9 - i / 10, "llm_score": 9 - i,
              "reason": f"reason {i}", "final_rank": i + 1} for i, p in enumerate(papers[:n])]
     db.save_rankings(rid, rows)
     key = f"{cfg.rerank.provider}/{cfg.rerank.model}"
     for p in papers[: n - 1]:
-        db.put_summary(p.id, key, json.dumps(SUMMARY), "pdf")
+        db.put_summary(p.id, key, json.dumps(SUMMARY), "pdf", topic=topic)
     return rid
 
 
@@ -48,7 +49,7 @@ def test_issue_and_comments_are_created(db, cfg, papers):
     assert result.complete and result.posted == 3 and result.issue_number == 1
     issue = gh.issues[1]
     assert issue["title"].startswith("Research digest: LLM evaluation, 20") and issue["title"].endswith(f"(run {rid})")
-    assert [x["name"] for x in issue["labels"]] == [LABEL] and LABEL in gh.labels
+    assert [x["name"] for x in issue["labels"]] == [LABEL, "topic:llm-evaluation"] and LABEL in gh.labels
     assert "**Scanned:** 10 papers from the last 7 days (10 new)" in issue["body"]
     assert "BM25 → top 10 → groq/openai/gpt-oss-120b rerank → top 3" in issue["body"]
 
@@ -63,7 +64,7 @@ def test_issue_and_comments_are_created(db, cfg, papers):
 
     assert set(db.delivered(rid)) == {p.id for p in papers[:3]}
     assert db.get_digest_issue(rid)["completed_at"] is not None
-    sent = db.conn.execute("SELECT COUNT(*) FROM papers WHERE sent_in_digest IS NOT NULL").fetchone()[0]
+    sent = db.conn.execute("SELECT COUNT(*) FROM topic_papers WHERE sent_in_digest IS NOT NULL").fetchone()[0]
     assert sent == 3
 
 
@@ -201,7 +202,7 @@ def test_no_client_and_no_papers(db, cfg, papers):
 def test_preview_shows_issue_and_every_comment(db, cfg, papers):
     rid = seed(db, cfg, papers)
     text = preview(build_content(db, cfg, rid))
-    assert f"ISSUE  Research digest: LLM evaluation" in text and "[label: digest]" in text
+    assert "ISSUE  Research digest: LLM evaluation" in text and "[labels: digest, topic:llm-evaluation]" in text
     assert text.count("--- comment ") == 3
 
 
@@ -210,3 +211,51 @@ def test_latest_undelivered_run(db, cfg, papers):
     assert db.latest_undelivered_run() == r1
     run(db, cfg, FakeGitHub())
     assert db.latest_undelivered_run() is None
+
+
+# --- Day 7: one issue per topic ---
+def test_each_topic_gets_its_own_issue_and_closes_only_its_own_previous(db, cfg, papers):
+    gh = FakeGitHub()
+    a1 = seed(db, cfg, papers, topic="llm-evaluation")
+    b1 = seed(db, cfg, papers, topic="ai-agents")
+    for rid in (a1, b1):
+        assert deliver_run(db, cfg, rid, gh.client(), sleep=lambda s: None).complete
+    a2 = seed(db, cfg, papers, topic="llm-evaluation")
+    result = deliver_run(db, cfg, a2, gh.client(), sleep=lambda s: None)
+
+    by_title = {i["title"].split(",")[0]: i for i in gh.issues.values()}
+    assert set(by_title) == {"Research digest: LLM evaluation", "Research digest: AI agents"}
+    agents = gh.issues[2]
+    assert agents["title"].startswith("Research digest: AI agents")
+    assert [x["name"] for x in agents["labels"]] == ["digest", "topic:ai-agents"]
+    assert {"digest", "topic:llm-evaluation", "topic:ai-agents"} <= gh.labels
+    assert result.closed == [1]  # llm-evaluation's previous issue...
+    assert gh.issues[1]["state"] == "closed" and gh.issues[2]["state"] == "open"  # ...not ai-agents'
+    assert "Weekly arXiv digest for **AI agents**" in agents["body"]
+
+
+def test_a_topic_removed_from_config_still_delivers(db, cfg, papers):
+    rid = seed(db, cfg, papers, topic="retired-topic")
+    gh = FakeGitHub()
+    assert deliver_run(db, cfg, rid, gh.client(), sleep=lambda s: None).complete
+    assert gh.issues[1]["title"].startswith("Research digest: retired-topic")
+
+
+def test_deliver_cli_finishes_every_topics_pending_run(tmp_path, papers, monkeypatch):
+    import digest.deliver as dl
+    from digest.db import Database
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text((ROOT / "config.yaml").read_text(encoding="utf-8").replace(
+        "path: data/digest.db", f"path: {(tmp_path / 'digest.db').as_posix()}"), encoding="utf-8")
+    c = load_config(cfg_path)
+    with Database.for_config(c) as db:
+        seed(db, c, papers, topic="llm-evaluation")
+        seed(db, c, papers, topic="ai-agents")
+    gh = FakeGitHub()
+    monkeypatch.setattr("digest.github.make_github", lambda: gh.client())
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)
+    assert dl.main(["--config", str(cfg_path)]) == 0
+    assert sorted(i["title"].split(",")[0] for i in gh.issues.values()) == [
+        "Research digest: AI agents", "Research digest: LLM evaluation"]
+    assert dl.main(["--config", str(cfg_path)]) == 0 and len(gh.issues) == 2  # nothing left to deliver

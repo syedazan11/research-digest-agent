@@ -67,9 +67,9 @@ def render(paper: Paper, position: int, total: int, done: int, rubric: str = "")
 
 
 def label_loop(store: LabelStore, key: Callable[[], str] = read_key, out: Callable[[str], None] = print,
-               rubric: str = "") -> dict:
-    todo = store.unlabelled()
-    total_pool = store.stats()["pool"]
+               rubric: str = "", topic: str | None = None) -> dict:
+    todo = store.unlabelled(topic)
+    total_pool = store.stats(topic)["pool"]
     already = total_pool - len(todo)
     history: list[str] = []  # paper ids labelled this session, for undo
     counts = {"relevant": 0, "not_relevant": 0, "skipped": 0, "undone": 0}
@@ -111,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(description="Label papers for evaluation and feedback learning")
     ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--topic", help="topic slug from config.yaml (default: the first topic)")
     ap.add_argument("--fetch", action="store_true", help="add the last --days of arXiv papers to the pool")
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--max", type=int, default=300, help="max papers to fetch")
@@ -125,26 +126,28 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
     cfg = load_config(args.config)
+    topic = cfg.get_topic(args.topic) if args.topic else cfg.topic
 
-    with LabelStore(cfg.labels_path) as store:
+    with LabelStore.for_config(cfg) as store:
         if args.relabel:
-            if not store.labels():
+            if not store.labels(topic.slug):
                 print("Nothing to archive: there are no current labels (an earlier --relabel already moved them).")
             else:
-                rnd, n = store.archive_labels()
+                rnd, n = store.archive_labels(topic.slug)
                 print(f"Archived {n} labels as round {rnd} (labels_archive). "
                       "The pool and cached LLM scores are kept.")
         if args.fetch:
-            papers = fetch_recent(cfg.topic.keywords, cfg.topic.categories, args.days, args.max)
-            added = store.add_to_pool(papers)
+            papers = fetch_recent(topic.keywords, topic.categories, args.days, args.max)
+            added = store.add_to_pool(papers, topic.slug)
             log.info("Label pool: %d fetched, %d new. Only data/labels.db was changed.", len(papers), added)
         elif not args.stats:
-            counts = label_loop(store, rubric=cfg.topic.label_rubric)
+            print(f"Topic: {topic.name} ({topic.slug})")
+            counts = label_loop(store, rubric=topic.label_rubric, topic=topic.slug)
             print(f"\nThis session: {counts['relevant']} relevant, {counts['not_relevant']} not, "
                   f"{counts['skipped']} skipped, {counts['undone']} undone")
-        s = store.stats()
+        s = store.stats(topic.slug)
         print(f"Pool {s['pool']}: {s['relevant']} relevant, {s['not_relevant']} not relevant, "
-              f"{s['unlabelled']} unlabelled  ({cfg.labels_path})")
+              f"{s['unlabelled']} unlabelled  [{topic.slug}]  ({cfg.labels_path})")
     return 0
 
 

@@ -148,3 +148,49 @@ def test_make_llm_builds_provider(monkeypatch):
 def test_make_llm_unknown_provider():
     with pytest.raises(ValueError):
         make_llm("openai", "gpt")
+
+
+# --- Day 7: call budget + Groq quota headers ---
+from digest.llm import BudgetedLLM, LLMBudgetExceeded, describe_rate_limits  # noqa: E402
+
+
+class CountingLLM:
+    name, model = "fake", "m"
+
+    def __init__(self):
+        self.calls = 0
+
+    def complete_json(self, system, user):
+        self.calls += 1
+        return "{}"
+
+
+def test_budget_stops_calls_once_used_up():
+    inner = CountingLLM()
+    llm = BudgetedLLM(inner, max_calls=2)
+    llm.complete_json("s", "u")
+    llm.complete_json("s", "u")
+    with pytest.raises(LLMBudgetExceeded, match="2 calls per run"):
+        llm.complete_json("s", "u")
+    assert inner.calls == 2 and llm.calls == 2 and llm.exhausted
+    assert isinstance(LLMBudgetExceeded("x"), LLMAuthError)  # callers stop and fall back, like a bad key
+    assert (llm.name, llm.model) == ("fake", "m")
+
+
+def test_rate_limit_headers_are_kept_from_the_raw_response():
+    class Raw:
+        headers = {"X-RateLimit-Remaining-Requests": "998", "x-ratelimit-limit-requests": "1000",
+                   "x-ratelimit-remaining-tokens": "7000", "x-ratelimit-limit-tokens": "8000",
+                   "x-ratelimit-reset-requests": "2m", "content-type": "application/json"}
+
+        def parse(self):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"a": 1}'))])
+
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        with_raw_response=SimpleNamespace(create=lambda **kw: Raw()))))
+    llm = GroqLLM(model="openai/gpt-oss-120b", client=fake)
+    assert llm.complete_json("s", "u") == '{"a": 1}'
+    assert llm.rate_limits["x-ratelimit-remaining-requests"] == "998" and "content-type" not in llm.rate_limits
+    assert describe_rate_limits(llm.rate_limits) == (
+        "requests 998/1000 left today (resets 2m), tokens 7000/8000 left this minute")
+    assert describe_rate_limits({}) == ""

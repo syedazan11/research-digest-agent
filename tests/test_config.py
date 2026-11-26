@@ -89,3 +89,63 @@ def test_production_feedback_share_matches_the_eval():
     share = cfg.ranking.feedback_weight / (cfg.ranking.bm25_weight + cfg.ranking.feedback_weight)
     assert share == pytest.approx(0.2)
     assert cfg.rerank.prompt_version == "v1"
+
+
+# --- Day 7: multiple topics ---
+TOPICS = """
+topics:
+  - name: LLM evaluation
+    keywords: [LLM evaluation]
+  - name: AI agents
+    slug: ai-agents
+    keywords: [LLM agent]
+    top_n: 3
+database:
+  path: test.db
+"""
+
+
+def test_project_config_has_two_topics_with_llm_evaluation_first():
+    cfg = load_config(ROOT / "config.yaml")
+    assert [t.slug for t in cfg.topics] == ["llm-evaluation", "ai-agents"]
+    assert cfg.topic.slug == "llm-evaluation"  # existing data was migrated to topics[0]
+    assert "cs.MA" in cfg.get_topic("ai-agents").categories and cfg.get_topic("ai-agents").label_rubric
+
+
+def test_topics_list(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(TOPICS, encoding="utf-8")
+    cfg = load_config(p)
+    assert [t.slug for t in cfg.topics] == ["llm-evaluation", "ai-agents"]  # first slug derived from the name
+    assert cfg.top_n(cfg.topics[0]) == 5 and cfg.top_n(cfg.topics[1]) == 3
+    with pytest.raises(ValueError, match="unknown topic"):
+        cfg.get_topic("nope")
+
+
+def test_single_topic_config_still_works(tmp_path):
+    cfg = load_config(write(tmp_path))  # BASE uses the old `topic:` key
+    assert len(cfg.topics) == 1 and cfg.topic.slug == "rag-evaluation" and cfg.topic.name == "RAG evaluation"
+
+
+@pytest.mark.parametrize("bad, match", [
+    ("topics:\n  - name: A\n    keywords: [k]\n  - name: A\n    keywords: [k]\n", "unique"),
+    ("topics:\n  - name: A\n    slug: Not_A_Slug\n    keywords: [k]\n", "lowercase"),
+    ("topics:\n  - name: A\n    keywords: [k]\ntopic:\n  name: B\n  keywords: [k]\n", "either"),
+    ("topics:\n  - name: A\n", "keyword"),
+    ("topics:\n  - name: A\n    keywords: [k]\n    top_n: 0\n", "top_n"),
+    ("topics:\n  - name: A\n    keywords: [k]\nllm:\n  max_calls_per_run: 0\n", "max_calls"),
+])
+def test_topic_validation(tmp_path, bad, match):
+    p = tmp_path / "c.yaml"
+    p.write_text(bad, encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        load_config(p)
+
+
+def test_example_config_loads_and_differs_from_mine():
+    ex = load_config(ROOT / "config.example.yaml")
+    assert [t.slug for t in ex.topics] == ["rag-evaluation", "robot-learning"]
+    assert ex.top_n(ex.topics[1]) == 3 and ex.llm.max_calls_per_run == 60
+    assert all(t.label_rubric for t in ex.topics)
+    mine = {t.slug for t in load_config(ROOT / "config.yaml").topics}
+    assert not mine & {t.slug for t in ex.topics}  # nobody copies my topics by accident
