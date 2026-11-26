@@ -126,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
     cfg = load_config(args.config)
 
-    with LabelStore(cfg.labels_path) as store:
+    with LabelStore.for_config(cfg) as store:
         if args.relabel:
             if not store.labels():
                 print("Nothing to archive: there are no current labels (an earlier --relabel already moved them).")

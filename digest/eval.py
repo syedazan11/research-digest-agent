@@ -388,7 +388,7 @@ def render_report(r: EvalResult, model_key: str, today: str) -> str:
 def load_dataset(cfg: Config) -> Dataset:
     from digest.db import Database
 
-    with LabelStore(cfg.labels_path, read_only=True) as store:
+    with LabelStore.for_config(cfg, read_only=True) as store:
         labelled = store.labelled_papers()
         rounds = store.conn.execute("SELECT MAX(round) FROM labels_archive").fetchone()[0]
         previous = store.archived_labels(rounds) if rounds else {}
@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int
             from digest.llm import make_llm
         llm = make_llm(cfg.rerank.provider, cfg.rerank.model)
     scores: dict[str, dict[str, float]] = {}
-    with LabelStore(cfg.labels_path) as store:
+    with LabelStore.for_config(cfg) as store:
         for version in args.versions:
             got = llm_scores_for(version, data.papers, store, model_key, topic, llm)
             if len(got) < len(data.papers) * 0.9:

@@ -322,7 +322,7 @@ def test_run_uses_feedback_retriever_when_weighted(setup, monkeypatch, caplog):
         "ranking:\n  top_k: 10", "ranking:\n  top_k: 10\n  weights:\n    bm25: 0.6\n    feedback: 0.4")
     setup.write_text(cfg_text + "  labels_path: data/labels.db\n", encoding="utf-8")
     sample = load_sample(FIXTURES / "sample_papers.json")
-    with LabelStore(setup.parent / "data" / "labels.db") as s:
+    with LabelStore(setup.parent / "data" / "labels.db", default_topic="rag-evaluation") as s:
         s.add_to_pool(sample)
         s.set_label("sample-002", True)
         s.set_label("sample-005", False)
