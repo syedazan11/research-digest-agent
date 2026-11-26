@@ -79,3 +79,13 @@ def test_day6_config(tmp_path):
     assert c.ranking.feedback_weight == 0.3 and c.rerank.prompt_version == "v3"
     with pytest.raises(ValueError):
         load_config(write(tmp_path, "rerank:\n  prompt_version: v9\n"))
+
+
+def test_production_feedback_share_matches_the_eval():
+    """The eval mixes BM25 and feedback as (1 - w, w) with w = 0.2. Production normalizes the weights of
+    the active retrievers, so with embeddings off the feedback share must be 0.2 as well."""
+    cfg = load_config(ROOT / "config.yaml")
+    assert cfg.embeddings.provider == "none"
+    share = cfg.ranking.feedback_weight / (cfg.ranking.bm25_weight + cfg.ranking.feedback_weight)
+    assert share == pytest.approx(0.2)
+    assert cfg.rerank.prompt_version == "v1"

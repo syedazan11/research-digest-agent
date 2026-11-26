@@ -26,7 +26,8 @@ ranking:
   weights:
     bm25: 0.4
     embedding: 0.6           # only used when embeddings.provider is gemini
-    feedback: 0.0            # Rocchio feedback from your 👍/👎 + y/n labels (Day 6, set by python -m digest.eval)
+    feedback: 0.1            # Rocchio feedback from your 👍/👎 + y/n labels. 0.1 / (0.4 + 0.1) = 20% of the
+                             # active weight with embeddings off: the share chosen by data/evals/2026-11-26.md
 
 embeddings:
   provider: none
@@ -40,7 +41,7 @@ rerank:
   model: openai/gpt-oss-120b
   top_n: 5
   batch_size: 5
-  prompt_version: v1        # v1 | v2 | v3, see digest/rerank.py (chosen by python -m digest.eval)
+  prompt_version: v1        # v1 | v2 | v3 (digest/rerank.py); v1 kept: best mean NDCG@10 in data/evals/2026-11-26.md
 
 # Stage 4: summarize the top_n papers (same LLM as rerank). Summaries are cached in the DB.
 summarize:
