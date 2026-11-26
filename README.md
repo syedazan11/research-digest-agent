@@ -3,19 +3,19 @@
 [![Weekly digest](https://github.com/syedazan11/research-digest-agent/actions/workflows/weekly-digest.yml/badge.svg)](https://github.com/syedazan11/research-digest-agent/actions/workflows/weekly-digest.yml)
 [![Tests](https://github.com/syedazan11/research-digest-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/syedazan11/research-digest-agent/actions/workflows/tests.yml)
 
-An agent that tracks new arXiv papers on a topic you choose, ranks them with hybrid retrieval and LLM reranking, and posts a weekly digest as a GitHub issue. It learns from your 👍/👎 reactions.
+An agent that tracks new arXiv papers on the topics you choose, ranks them with hybrid retrieval and LLM reranking, and posts a weekly digest per topic as a GitHub issue. It learns from your 👍/👎 reactions. Make your own copy in 5 minutes (below).
 
-> **Status: Day 6 of 7.** The full pipeline runs unattended every Monday on GitHub Actions: fetch → dedup → hybrid ranking (BM25 + feedback learning) → LLM rerank → PDF summaries → GitHub issue → 👍/👎 feedback, measured on a hand-labelled eval set (see Results). The archive comes next. See [GUIDE.md](GUIDE.md).
+> **Status: Day 7.** The full pipeline runs unattended every Monday on GitHub Actions, for several topics at once (currently *LLM evaluation* and *AI agents*): fetch → per-topic dedup → hybrid ranking (BM25 + feedback learning) → LLM rerank → PDF summaries → one GitHub issue per topic → 👍/👎 feedback, measured on a hand-labelled eval set (see Results). The repo is usable as a template. See [GUIDE.md](GUIDE.md).
 
 ## Pipeline
 
 ```
 GitHub Actions, Mondays 09:15 PKT:
-  python -m digest.feedback → owner's 👍/👎 reactions from last week → SQLite
-  python -m digest.run:
-    arXiv fetch → SQLite dedup → Hybrid ranking (BM25 + Gemini embeddings) → top 20
-      → LLM rerank (Groq gpt-oss-120b) → top 5 → PyMuPDF summaries
-      → GitHub issue (1 comment per paper) + Markdown digest
+  python -m digest.feedback → owner's 👍/👎 reactions from last week → SQLite (tagged by topic)
+  python -m digest.run, for each topic in config.yaml (one failing topic doesn't stop the others):
+    arXiv fetch → per-topic dedup → Hybrid ranking (BM25 + this topic's feedback) → top 20
+      → LLM rerank (Groq gpt-oss-120b) → top N → PyMuPDF summaries
+      → GitHub issue labelled topic:<slug> (1 comment per paper) + Markdown digest
   commit data/digest.db back to the repo
 ```
 
@@ -30,7 +30,21 @@ python -m pytest                  # all offline, fake API clients
 python -m digest.run --dry-run    # real run that writes and posts nothing
 ```
 
-To run it weekly on your own fork: add a `GROQ_API_KEY` repository secret, then use **Actions → Weekly digest → Run workflow** once. See GUIDE.md, Day 5.
+`--topic <slug>` runs one topic; every other command (`digest.label`, `digest.eval`, `digest.feedback`, `digest.deliver`, `digest.judge`) takes `--topic` too.
+
+## Use it yourself in 5 minutes
+
+All in the browser, no Python needed. You need a GitHub account and a free [Groq API key](https://console.groq.com/keys).
+
+1. **Copy the repo:** click **Use this template → Create a new repository** (public, so Actions minutes are free).
+2. **Pick your topics:** in your copy, open `config.yaml` → ✏️ edit, and replace the `topics:` list with yours. [`config.example.yaml`](config.example.yaml) has a commented two-topic example; each topic needs a `name`, `slug`, `description`, `keywords` and `categories` ([arXiv categories](https://arxiv.org/category_taxonomy)).
+3. **Start with empty data:** **Actions → Reset data → Run workflow**, type `RESET`. Your copy came with my papers, runs and labels; this replaces them with empty databases (it refuses to run on the original repo).
+4. **Add your key:** **Settings → Secrets and variables → Actions**:
+   - **Secrets → New repository secret:** `GROQ_API_KEY` = your key
+   - **Variables → New repository variable:** `DIGEST_ENABLED` = `true` (turns on the Monday schedule; without it, a fresh copy never posts on its own)
+5. **Run it:** **Actions → Weekly digest → Run workflow**. A few minutes later each topic has a digest issue in your **Issues** tab. React 👍/👎 on papers; next Monday's run learns from it.
+
+Keyword tip: a single broad word can flood a topic. Watch the run log for `Fetch hit max_results`. For *AI agents*, `agentic` alone matched 500+ papers a week; `agentic system` / `agentic workflow` matched 12-32.
 
 ## Design decisions
 
@@ -46,6 +60,7 @@ To run it weekly on your own fork: add a `GROQ_API_KEY` repository secret, then 
 | Automation | GitHub Actions, weekly cron + manual trigger, built-in `GITHUB_TOKEN` (contents + issues write only) | Free, no server. `--strict` makes any fallback fail the job (GitHub emails you), but whatever succeeded is still committed. |
 | Feedback learning | Rocchio: TF-IDF similarity to 👍 papers minus 👎 papers, from reactions + hand labels, as a hybrid retriever | Cheap, explainable, needs no training run. A paper's own label is removed before it's scored, so it can't help itself. |
 | Evaluation | Hand labels, P@5 / R@20 / NDCG@10, 20 repeated 2-fold splits, LLM scores cached | One split was too noisy to pick a winner (it chose v3; 20 splits chose v1). |
+| Multiple topics | One run row, digest file, issue (`topic:<slug>` label) and feedback set per topic; dedup per topic; one LLM client with a per-run call budget | Topics stay independent (a paper can appear in two digests; a 👍 in one never affects another), and one topic's outage doesn't cost the others their digest. |
 | Storage | SQLite file committed to the repo by the workflow | One file, zero setup, versioned with the code. Trade-offs below. |
 
 ### Why the SQLite database lives in git
@@ -63,13 +78,14 @@ At ~140 KB plus a few KB a week, committing to `main` stays cheap for years. If 
 ## Known limitations
 
 - **GitHub may silently stop the weekly schedule.** In a public repo, GitHub disables scheduled workflows after [60 days with no repository activity](https://docs.github.com/en/actions/using-workflows/disabling-and-enabling-a-workflow). The bot's own weekly commits most likely don't count: the [gh-action-keepalive](https://github.com/efrecon/gh-action-keepalive) project tried exactly that and reports it didn't work. Workflow runs don't count either. So after two months without a human push, the digest stops arriving. **What to do:** the missing Monday issue is the alarm. Re-enable the workflow in **Actions → Weekly digest → Enable workflow**, or push any commit. A keepalive step using a second token is possible but not set up.
+- **Groq's free tier caps the number of topics.** 1000 requests/day and, the real limit, 8000 tokens/minute. Two topics take ~30 calls and ~4 minutes (mostly waiting for the per-minute token window); `llm.max_calls_per_run` (60) stops a bad week from burning the day's quota.
 - **Scheduled runs can be late.** GitHub queues cron jobs and delays them at busy times, so "09:15" means "some time Monday morning".
 - **arXiv from cloud runners.** arXiv can be slow or rate-limit requests from cloud IPs. A paper whose PDF can't be fetched is summarized from its abstract, and the digest says so.
 - **Rerank scores bunch up.** With prompt v1, top papers often share a 9/10 and BM25 breaks the ties. Day 6 tested stricter prompts: they spread the scores out but didn't rank better, so v1 stays (see Results).
 
 ## Results
 
-Ranking evaluation from 2026-11-26 ([full report](data/evals/2026-11-26.md), `python -m digest.eval`).
+Ranking evaluation for the **LLM evaluation** topic, 2026-11-26 ([full report](data/evals/2026-11-26.md), `python -m digest.eval --topic llm-evaluation`). The *AI agents* topic has no labels yet.
 
 **Dataset:** 108 papers from a one-off 30-day arXiv fetch with the topic keywords, hand-labelled by me against a written rubric: *y = the paper's main contribution is about evaluating LLMs; n = it only uses an LLM or benchmark as a tool, or evaluation is a side detail.* 46 relevant, 62 not.
 
