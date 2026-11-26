@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     if gh is None:
         return 1
     try:
-        with Database(cfg.db_path) as db:
+        with Database.for_config(cfg) as db:
             r = collect_feedback(gh, db, cfg.deliver.feedback_days, cfg.deliver.feedback_users)
             total = db.conn.execute("SELECT COUNT(*) FROM feedback WHERE source = 'github'").fetchone()[0]
     finally:

@@ -394,7 +394,7 @@ def load_dataset(cfg: Config) -> Dataset:
         previous = store.archived_labels(rounds) if rounds else {}
     reactions = []
     if cfg.db_path.exists():
-        with Database(cfg.db_path, in_memory_copy=True) as db:  # never writes digest.db
+        with Database.for_config(cfg, in_memory_copy=True) as db:  # never writes digest.db
             for row in db.conn.execute("SELECT paper_id, rating FROM feedback WHERE source = 'github'"):
                 paper = db.get_paper(row["paper_id"])
                 if paper is not None:

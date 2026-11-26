@@ -5,7 +5,7 @@ from digest.maintenance import commit_message, last_run_id, main, vacuum
 def test_last_run_id(tmp_path):
     path = tmp_path / "d.db"
     assert last_run_id(path) == 0  # no DB yet
-    with Database(path) as db:
+    with Database(path, default_topic="test-topic") as db:
         db.log_run(1, 1, 1, ["bm25"])
         db.log_run(1, 1, 1, ["bm25"])
     assert last_run_id(path) == 2
@@ -13,7 +13,7 @@ def test_last_run_id(tmp_path):
 
 def test_commit_message(tmp_path, papers):
     path = tmp_path / "d.db"
-    with Database(path) as db:
+    with Database(path, default_topic="test-topic") as db:
         db.save_papers(papers)
         before = db.log_run(10, 10, 10, ["bm25"])
         run = db.log_run(10, 10, 10, ["bm25"])
@@ -28,14 +28,14 @@ def test_commit_message(tmp_path, papers):
 
 def test_commit_message_without_issue(tmp_path):
     path = tmp_path / "d.db"
-    with Database(path) as db:
+    with Database(path, default_topic="test-topic") as db:
         db.log_run(0, 0, 0, ["bm25"])
     assert commit_message(path, since_run=0) == "digest: run 1 (0 papers)"
 
 
 def test_vacuum_shrinks_after_deletes(tmp_path):
     path = tmp_path / "d.db"
-    with Database(path) as db:
+    with Database(path, default_topic="test-topic") as db:
         db.conn.execute("CREATE TABLE junk (x BLOB)")
         db.conn.executemany("INSERT INTO junk VALUES (?)", [(b"x" * 10_000,)] * 50)
         db.conn.commit()
@@ -48,7 +48,7 @@ def test_vacuum_shrinks_after_deletes(tmp_path):
 def test_cli(tmp_path, capsys):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("topic:\n  name: T\n  keywords: [k]\ndatabase:\n  path: d.db\n", encoding="utf-8")
-    with Database(tmp_path / "d.db") as db:
+    with Database(tmp_path / "d.db", default_topic="test-topic") as db:
         db.log_run(0, 0, 0, ["bm25"])
     assert main(["--config", str(cfg), "last-run"]) == 0
     assert main(["--config", str(cfg), "commit-message", "--since", "0"]) == 0

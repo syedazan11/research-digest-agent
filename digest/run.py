@@ -233,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     summarize_on = cfg.summarize.enabled and not args.no_summarize
 
     # --dry-run works on an in-memory snapshot: same reads as a real run, nothing written to disk
-    with Database(cfg.db_path, in_memory_copy=args.dry_run) as db:
+    with Database.for_config(cfg, in_memory_copy=args.dry_run) as db:
         # 1. fetch
         with timer("fetch"):
             if args.sample:

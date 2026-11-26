@@ -23,7 +23,7 @@ def papers():
 
 @pytest.fixture
 def db(tmp_path):
-    with Database(tmp_path / "test.db") as d:
+    with Database(tmp_path / "test.db", default_topic="test-topic") as d:
         yield d
 
 

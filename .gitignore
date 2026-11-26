@@ -27,3 +27,5 @@ data/digests/
 .idea/
 .DS_Store
 Thumbs.db
+# backups written before a schema migration or a reset
+data/*.bak*

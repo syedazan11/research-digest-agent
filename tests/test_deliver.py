@@ -63,7 +63,7 @@ def test_issue_and_comments_are_created(db, cfg, papers):
 
     assert set(db.delivered(rid)) == {p.id for p in papers[:3]}
     assert db.get_digest_issue(rid)["completed_at"] is not None
-    sent = db.conn.execute("SELECT COUNT(*) FROM papers WHERE sent_in_digest IS NOT NULL").fetchone()[0]
+    sent = db.conn.execute("SELECT COUNT(*) FROM topic_papers WHERE sent_in_digest IS NOT NULL").fetchone()[0]
     assert sent == 3
 
 

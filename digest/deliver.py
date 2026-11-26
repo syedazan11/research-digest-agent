@@ -267,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     cfg = load_config(args.config)
 
-    with Database(cfg.db_path, in_memory_copy=args.dry_run) as db:
+    with Database.for_config(cfg, in_memory_copy=args.dry_run) as db:
         run_id = args.run or db.latest_undelivered_run()
         if run_id is None:
             log.info("Nothing to deliver: every run with selected papers is already delivered")

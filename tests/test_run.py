@@ -81,7 +81,7 @@ def test_run_with_rerank_saves_scores(setup, monkeypatch, capsys):
     assert cands[0]["final_rank"] == 1 and cands[0]["llm_score"] == 10 and cands[0]["llm_reason"]
     assert cands[3]["final_rank"] is None
 
-    with Database(setup.parent / "data" / "test.db") as db:
+    with Database(setup.parent / "data" / "test.db", default_topic="rag-evaluation") as db:
         rows = db.get_rankings(1)
         assert len(rows) == 10 and sum(r["selected"] for r in rows) == 3
         note = db.conn.execute("SELECT notes FROM runs WHERE id = 1").fetchone()[0]
@@ -121,7 +121,7 @@ def test_unicode_reason_does_not_crash_a_cp1252_console(setup, monkeypatch):
     console.flush()
     # U+2011 is normalized to "-" (prompting.normalize_text); the arrow isn't, and becomes "?"
     assert "LLM-as-a-judge ? relevant" in console.buffer.getvalue().decode("cp1252")
-    with Database(setup.parent / "data" / "test.db") as db:
+    with Database(setup.parent / "data" / "test.db", default_topic="rag-evaluation") as db:
         assert len(db.get_rankings(1)) == 10  # saved
 
 
@@ -177,7 +177,7 @@ def test_full_run_writes_markdown_digest(setup, monkeypatch, caplog):
 
     assert "LLM calls this run: 5 (rerank 2, summarize 3)" in caplog.text
     assert "Timing: fetch" in caplog.text and "summarize" in caplog.text
-    with Database(setup.parent / "data" / "test.db") as db:
+    with Database(setup.parent / "data" / "test.db", default_topic="rag-evaluation") as db:
         assert db.conn.execute("SELECT COUNT(*) FROM summaries").fetchone()[0] == 3
         note = db.conn.execute("SELECT notes FROM runs WHERE id = 1").fetchone()[0]
         assert "summaries: 3/3 (0 from PDF, 3 abstract-only, 0 cached)" in note
@@ -292,7 +292,7 @@ def test_strict_github_failure_exits_1_but_saves_everything(setup, monkeypatch, 
         assert run.main(args(setup, "--strict")) == 1
     assert "Degraded run: GitHub delivery failed" in caplog.text
     assert len(list((setup.parent / "data" / "digests").glob("*.md"))) == 1
-    with Database(setup.parent / "data" / "test.db") as db:
+    with Database(setup.parent / "data" / "test.db", default_topic="rag-evaluation") as db:
         assert db.get_run(1) is not None and len(db.selected_rankings(1)) == 3
 
 

@@ -188,7 +188,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None, fetche
 
     results: list[Judged] = []
     try:
-        with Database(cfg.db_path, in_memory_copy=True) as db:  # read only
+        with Database.for_config(cfg, in_memory_copy=True) as db:  # read only
             rows = db.conn.execute("SELECT * FROM summaries WHERE model = ? ORDER BY created_at",
                                    (summarizer,)).fetchall()
             for row in rows:
