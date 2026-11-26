@@ -17,8 +17,8 @@ def delivered(db, cfg, papers):
     return gh, comments  # paper_id -> comment_id
 
 
-def rating(db, paper_id):
-    row = db.get_feedback(paper_id)
+def rating(db, paper_id, topic="llm-evaluation"):  # seed() logs runs under config.yaml's first topic
+    row = db.get_feedback(paper_id, topic)
     return None if row is None else row["rating"]
 
 
@@ -32,7 +32,7 @@ def test_owner_reactions_become_feedback(db, cfg, papers):
     r = collect_feedback(gh.client(), db)
     assert (r.added, r.comments_checked) == (2, 3)
     assert (rating(db, a), rating(db, b), rating(db, c)) == (1, -1, None)
-    row = db.get_feedback(a)
+    row = db.get_feedback(a, "llm-evaluation")
     assert row["source"] == "github" and row["comment_id"] == cid[a]
 
 
@@ -109,7 +109,7 @@ def test_same_paper_in_two_digests_uses_newest_reaction(db, cfg, papers):
     gh.react(first, OWNER, "-1", at="2026-11-20T10:00:00Z")
     gh.react(second, OWNER, "+1", at="2026-11-27T10:00:00Z")
     collect_feedback(gh.client(), db)
-    assert rating(db, a) == 1 and db.get_feedback(a)["comment_id"] == second
+    assert rating(db, a) == 1 and db.get_feedback(a, "llm-evaluation")["comment_id"] == second
 
 
 def test_bad_token_is_reported_not_raised(db, cfg, papers):
@@ -124,3 +124,24 @@ def test_old_deliveries_are_not_polled(db, cfg, papers):
     db.conn.execute("UPDATE deliveries SET posted_at = '2026-01-01T00:00:00+00:00'")
     r = collect_feedback(gh.client(), db, days=30)
     assert r.comments_checked == 0
+
+
+
+# --- Day 7: feedback per topic ---
+def test_the_same_paper_rated_differently_in_two_topics(db, cfg, papers):
+    gh = FakeGitHub()
+    seed(db, cfg, papers, topic="llm-evaluation")
+    seed(db, cfg, papers, topic="ai-agents")
+    for rid in (1, 2):
+        run_deliver = __import__("digest.deliver", fromlist=["deliver_run"]).deliver_run
+        assert run_deliver(db, cfg, rid, gh.client(), sleep=lambda s: None).complete
+    a = papers[0].id
+    llm_eval_c, agents_c = sorted(c["id"] for c in gh.comments.values() if f"paper={a} " in c["body"])
+    gh.react(llm_eval_c, OWNER, "+1")
+    gh.react(agents_c, OWNER, "-1")
+
+    collect_feedback(gh.client(), db)
+    assert rating(db, a, "llm-evaluation") == 1 and rating(db, a, "ai-agents") == -1
+
+    r = collect_feedback(gh.client(), db, topic="ai-agents")  # --topic: only that topic's comments
+    assert r.comments_checked == 3

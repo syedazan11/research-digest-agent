@@ -39,18 +39,19 @@ class FeedbackResult:
     error: str = ""
 
 
-def collect_feedback(gh: GitHubClient, db: Database, days: int = 30,
+def collect_feedback(gh: GitHubClient, db: Database, days: int = 30, topic: str | None = None,
                      users: list[str] | None = None) -> FeedbackResult:
     result = FeedbackResult()
     allowed = {u.lower() for u in (users or [gh.owner])}
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
 
-    comments_by_paper: dict[str, list[int]] = {}
-    for row in db.recent_deliveries(since):
-        comments_by_paper.setdefault(row["paper_id"], []).append(row["comment_id"])
+    # (topic, paper) -> comments: a paper in two topics' digests gets a rating per topic
+    comments_by_paper: dict[tuple[str, str], list[int]] = {}
+    for row in db.recent_deliveries(since, topic):
+        comments_by_paper.setdefault((row["topic"], row["paper_id"]), []).append(row["comment_id"])
 
     try:
-        for paper_id, comment_ids in comments_by_paper.items():
+        for (paper_topic, paper_id), comment_ids in comments_by_paper.items():
             latest: tuple[str, int, int] | None = None  # (reacted_at, rating, comment_id)
             read_any = False
             for cid in comment_ids:
@@ -75,18 +76,18 @@ def collect_feedback(gh: GitHubClient, db: Database, days: int = 30,
 
             if not read_any:
                 continue  # can't see GitHub's state: keep what we have
-            old = db.get_feedback(paper_id)
+            old = db.get_feedback(paper_id, paper_topic)
             if latest is None:
-                if db.delete_feedback(paper_id):
+                if db.delete_feedback(paper_id, paper_topic):
                     result.removed += 1
-                    log.info("Feedback removed for %s (reaction taken back)", paper_id)
+                    log.info("Feedback removed for %s in %s (reaction taken back)", paper_id, paper_topic)
                 continue
-            if db.upsert_feedback(paper_id, latest[1], latest[2], latest[0]):
+            if db.upsert_feedback(paper_id, latest[1], latest[2], latest[0], topic=paper_topic):
                 if old is None:
                     result.added += 1
                 else:
                     result.changed += 1
-                log.info("Feedback for %s: %s", paper_id, "👍" if latest[1] > 0 else "👎")
+                log.info("Feedback for %s in %s: %s", paper_id, paper_topic, "👍" if latest[1] > 0 else "👎")
             else:
                 result.unchanged += 1
     except GitHubAuthError as e:
@@ -110,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(description="Read 👍/👎 reactions on digest comments into the DB")
     ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--topic", help="only this topic's digests (default: every topic)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -120,18 +122,23 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
     load_dotenv()
     cfg = load_config(args.config)
+    topic = cfg.get_topic(args.topic).slug if args.topic else None
 
     gh = make_github()
     if gh is None:
         return 1
     try:
         with Database.for_config(cfg) as db:
-            r = collect_feedback(gh, db, cfg.deliver.feedback_days, cfg.deliver.feedback_users)
-            total = db.conn.execute("SELECT COUNT(*) FROM feedback WHERE source = 'github'").fetchone()[0]
+            r = collect_feedback(gh, db, days=cfg.deliver.feedback_days, topic=topic,
+                                 users=cfg.deliver.feedback_users)
+            per_topic = dict(db.conn.execute(
+                "SELECT topic, COUNT(*) FROM feedback WHERE source = 'github' GROUP BY topic").fetchall())
+            total = sum(per_topic.values())
     finally:
         gh.close()
-    log.info("Feedback: %d comments checked, %d added, %d changed, %d removed, %d unchanged (%d in DB), "
-             "%d GitHub requests", r.comments_checked, r.added, r.changed, r.removed, r.unchanged, total, gh.requests)
+    log.info("Feedback: %d comments checked, %d added, %d changed, %d removed, %d unchanged (%d in DB: %s), "
+             "%d GitHub requests", r.comments_checked, r.added, r.changed, r.removed, r.unchanged, total,
+             ", ".join(f"{t} {n}" for t, n in sorted(per_topic.items())) or "none", gh.requests)
     return 1 if r.error else 0
 
 

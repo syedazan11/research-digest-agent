@@ -175,7 +175,8 @@ def test_full_run_writes_markdown_digest(setup, monkeypatch, caplog):
     # sample papers have no PDF link, so every summary is abstract-based and says so
     assert md.count("*Summary based on the abstract only (download_failed).*") == 3
 
-    assert "LLM calls this run: 5 (rerank 2, summarize 3)" in caplog.text
+    assert "Topic rag-evaluation: degraded, 3 papers, LLM calls 5 (rerank 2, summarize 3)" in caplog.text
+    assert "LLM calls this run: 5 of a 60 budget" in caplog.text
     assert "Timing: fetch" in caplog.text and "summarize" in caplog.text
     with Database(setup.parent / "data" / "test.db", default_topic="rag-evaluation") as db:
         assert db.conn.execute("SELECT COUNT(*) FROM summaries").fetchone()[0] == 3
@@ -290,7 +291,7 @@ def test_strict_github_failure_exits_1_but_saves_everything(setup, monkeypatch, 
     monkeypatch.setattr(run, "make_github", lambda: gh.client())
     with caplog.at_level("ERROR"):
         assert run.main(args(setup, "--strict")) == 1
-    assert "Degraded run: GitHub delivery failed" in caplog.text
+    assert "Degraded run: rag-evaluation: GitHub delivery failed" in caplog.text
     assert len(list((setup.parent / "data" / "digests").glob("*.md"))) == 1
     with Database(setup.parent / "data" / "test.db", default_topic="rag-evaluation") as db:
         assert db.get_run(1) is not None and len(db.selected_rankings(1)) == 3
@@ -310,7 +311,7 @@ def test_degraded_run_without_strict_still_exits_0(setup, monkeypatch, caplog):
     monkeypatch.setattr(run, "make_llm", lambda provider, model: None)  # make_github is None too
     with caplog.at_level("WARNING"):
         assert run.main(args(setup)) == 0
-    assert "Degraded run: GitHub delivery skipped" in caplog.text
+    assert "Degraded run: rag-evaluation: GitHub delivery skipped" in caplog.text
 
 
 # --- Day 6: feedback retriever in the pipeline ---
@@ -331,3 +332,147 @@ def test_run_uses_feedback_retriever_when_weighted(setup, monkeypatch, caplog):
         assert run.main(args(setup, "--dry-run", "--no-deliver")) == 0
     assert "Feedback retriever: 1 liked, 1 disliked (0 reactions, 2 labels), weight 0.40" in caplog.text
     assert "Retrievers: bm25, feedback" in caplog.text
+
+
+# --- Day 7: several topics in one run ---
+MULTI = """
+topics:
+  - name: RAG evaluation
+    slug: rag-eval
+    description: Evaluating retrieval-augmented generation.
+    keywords: [RAG evaluation, faithfulness, hallucination]
+    categories: [cs.CL]
+  - name: Robot learning
+    slug: robots
+    description: Robots that learn locomotion and manipulation.
+    keywords: [reinforcement learning, quadruped]
+    categories: [cs.RO]
+    top_n: 2
+ranking:
+  top_k: 10
+  weights:
+    bm25: 0.4
+    feedback: 0.1
+embeddings:
+  provider: none
+rerank:
+  top_n: 3
+database:
+  path: data/test.db
+  labels_path: data/labels.db
+"""
+
+
+@pytest.fixture
+def multi(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(MULTI, encoding="utf-8")
+    monkeypatch.setattr(run, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(run, "PdfFetcher", OfflineFetcher)
+    monkeypatch.setattr(run, "make_github", lambda: None)
+    return cfg
+
+
+def db_of(cfg):
+    return Database(cfg.parent / "data" / "test.db", default_topic="rag-eval")
+
+
+def test_every_topic_gets_its_own_run_digest_and_issue(multi, monkeypatch, caplog):
+    from fake_github import FakeGitHub
+
+    gh = FakeGitHub()
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    monkeypatch.setattr(run, "make_github", lambda: gh.client())
+    with caplog.at_level("INFO"):
+        assert run.main(args(multi)) == 0
+
+    with db_of(multi) as db:
+        topics = dict(db.conn.execute("SELECT id, topic FROM runs").fetchall())
+        assert topics == {1: "rag-eval", 2: "robots"}
+        # the same 10 sample papers were new for BOTH topics: dedup is per topic
+        assert db.count_papers("rag-eval") == 10 and db.count_papers("robots") == 10 and db.count_papers() == 10
+        assert len(db.selected_rankings(1)) == 3 and len(db.selected_rankings(2)) == 2  # per-topic top_n
+        assert db.conn.execute("SELECT COUNT(DISTINCT topic) FROM summaries").fetchone()[0] == 2
+    names = sorted(p.name for p in (multi.parent / "data" / "digests").glob("*.md"))
+    assert len(names) == 2 and names[0].endswith("_rag-eval_run1.md") and names[1].endswith("_robots_run2.md")
+    titles = sorted(i["title"].split(",")[0] for i in gh.issues.values())
+    assert titles == ["Research digest: RAG evaluation", "Research digest: Robot learning"]
+    assert "Topic rag-eval: ok, 3 papers" in caplog.text and "Topic robots: ok, 2 papers" in caplog.text
+
+    # next week: each topic only skips papers IT has seen
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        assert run.main(args(multi)) == 0
+    assert caplog.text.count("10 fetched, 0 new (10 already seen by this topic)") == 2
+
+
+def test_topic_flag_runs_just_one(multi, monkeypatch):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    assert run.main(args(multi, "--topic", "robots", "--no-deliver")) == 0
+    with db_of(multi) as db:
+        assert [r[0] for r in db.conn.execute("SELECT topic FROM runs")] == ["robots"]
+    with pytest.raises(ValueError, match="unknown topic"):
+        run.main(args(multi, "--topic", "nope"))
+
+
+def test_one_topic_failing_does_not_stop_the_others(multi, monkeypatch, caplog):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: FakeLLM(default=rerank_and_summarize({})))
+    real = run.build_ranker
+
+    def flaky(cfg, db, use_embeddings, topic=None):
+        if topic.slug == "rag-eval":
+            raise RuntimeError("simulated bug in one topic")
+        return real(cfg, db, use_embeddings, topic)
+
+    monkeypatch.setattr(run, "build_ranker", flaky)
+    with caplog.at_level("INFO"):
+        assert run.main(args(multi, "--no-deliver")) == 0  # without --strict: the job passes...
+    assert "[rag-eval] Topic failed: RuntimeError: simulated bug" in caplog.text
+    assert "Topic rag-eval: FAILED" in caplog.text and "Topic robots: ok, 2 papers" in caplog.text
+    with db_of(multi) as db:
+        assert [r[0] for r in db.conn.execute("SELECT topic FROM runs")] == ["robots"]  # robots still ran
+    assert len(list((multi.parent / "data" / "digests").glob("*_robots_*.md"))) == 1
+
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        assert run.main(args(multi, "--no-deliver", "--strict")) == 1  # ...with --strict it fails at the end
+    assert "Degraded run: rag-eval: crashed (RuntimeError" in caplog.text
+
+
+def test_every_topic_failing_exits_1_even_without_strict(multi, monkeypatch):
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: None)
+
+    def always(*a, **k):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(run, "build_ranker", always)
+    assert run.main(args(multi, "--no-deliver")) == 1
+
+
+def test_llm_budget_is_shared_across_topics(multi, monkeypatch, caplog):
+    multi.write_text(MULTI + "llm:\n  max_calls_per_run: 3\n", encoding="utf-8")
+    llm = FakeLLM(default=rerank_and_summarize({}))
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: llm)
+    with caplog.at_level("INFO"):
+        assert run.main(args(multi, "--no-deliver", "--strict")) == 1  # second topic ran out: degraded
+    assert llm.calls == 3  # never past the budget
+    assert "LLM budget of 3 calls per run used up" in caplog.text
+    assert "LLM calls this run: 3 of a 3 budget" in caplog.text
+    assert "Degraded run: robots: LLM rerank fell back" in caplog.text
+
+
+def test_feedback_learning_uses_only_the_topics_own_labels(multi, monkeypatch, caplog):
+    from digest.fetch import load_sample
+    from digest.labels import LabelStore
+
+    sample = load_sample(FIXTURES / "sample_papers.json")
+    with LabelStore(multi.parent / "data" / "labels.db", default_topic="rag-eval") as s:
+        s.add_to_pool(sample, topic="rag-eval")
+        s.set_label("sample-002", True, topic="rag-eval")
+        s.set_label("sample-005", False, topic="rag-eval")
+    monkeypatch.setattr(run, "make_llm", lambda provider, model: None)
+    with caplog.at_level("INFO"):
+        run.main(args(multi, "--dry-run", "--no-deliver"))
+    lines = [l for l in caplog.text.splitlines() if "Feedback retriever:" in l]
+    assert "1 liked, 1 disliked (0 reactions, 2 labels)" in lines[0]  # rag-eval
+    assert "0 liked, 0 disliked (0 reactions, 0 labels)" in lines[1]  # robots: nothing leaks across

@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from digest.config import Config
+from digest.config import Config, TopicConfig
 from digest.db import Database
 from digest.github import GitHubAuthError, GitHubClient, GitHubError, GitHubNotFound
 from digest.prompting import parse_json_model
@@ -51,6 +51,11 @@ class DigestContent:
     title: str
     body: str
     comments: list[tuple[str, str]]  # (paper_id, comment body), in final-rank order
+    topic: str = ""  # slug; the issue also gets the label topic:<slug>
+
+    @property
+    def labels(self) -> list[str]:
+        return [LABEL, topic_label(self.topic)] if self.topic else [LABEL]
 
 
 @dataclass
@@ -74,8 +79,22 @@ def model_key(cfg: Config) -> str:
     return f"{cfg.rerank.provider}/{cfg.rerank.model}"
 
 
+def run_topic_config(db: Database, cfg: Config, run_id: int) -> TopicConfig:
+    """The TopicConfig a run belongs to (a placeholder if that topic has since left config.yaml)."""
+    slug = db.run_topic(run_id) or cfg.topic.slug
+    try:
+        return cfg.get_topic(slug)
+    except ValueError:
+        return TopicConfig(name=slug, description="", keywords=[slug], categories=[], slug=slug)
+
+
+def topic_label(slug: str) -> str:
+    return f"topic:{slug}"
+
+
 def load_entries(db: Database, cfg: Config, run_id: int) -> list[tuple[RerankedPaper, PaperSummary]]:
-    """The selected papers of a run with their scores and cached summaries, in final order."""
+    """The selected papers of a run with their scores and its topic's cached summaries, in final order."""
+    slug = run_topic_config(db, cfg, run_id).slug
     entries = []
     for r in db.selected_rankings(run_id):
         paper = db.get_paper(r["paper_id"])
@@ -84,7 +103,7 @@ def load_entries(db: Database, cfg: Config, run_id: int) -> list[tuple[RerankedP
             continue
         item = RerankedPaper(RankedPaper(paper, r["hybrid_score"]), hybrid_rank=r["hybrid_rank"],
                              llm_score=r["llm_score"], reason=r["reason"] or "", final_rank=r["final_rank"])
-        row = db.get_summary(paper.id, model_key(cfg))
+        row = db.get_summary(paper.id, model_key(cfg), slug)
         summary = None
         if row is not None:
             try:
@@ -102,6 +121,7 @@ def build_content(db: Database, cfg: Config, run_id: int) -> DigestContent:
     if run is None:
         raise ValueError(f"run {run_id} not found")
     entries = load_entries(db, cfg, run_id)
+    topic = run_topic_config(db, cfg, run_id)
     date = run["started_at"][:10]
     retrievers = " + ".join(RETRIEVER_NAMES.get(n, n) for n in json.loads(run["retrievers"])) or "hybrid"
     if any(item.llm_score is not None for item, _ in entries):
@@ -110,7 +130,7 @@ def build_content(db: Database, cfg: Config, run_id: int) -> DigestContent:
         ranking = f"{retrievers} → top {len(entries)} (no LLM rerank this run)"
 
     body = "\n".join([
-        f"Weekly arXiv digest for **{md(cfg.topic.name)}**.",
+        f"Weekly arXiv digest for **{md(topic.name)}**.",
         "",
         f"- **Scanned:** {run['n_fetched']} papers from the last {cfg.fetch.days_back} days "
         f"({run['n_new']} new)",
@@ -125,14 +145,14 @@ def build_content(db: Database, cfg: Config, run_id: int) -> DigestContent:
         lines += ["React 👍 or 👎 to rate this paper.", "",
                   _PAPER_MARKER.format(run_id=run_id, paper_id=item.ranked.paper.id)]
         comments.append((item.ranked.paper.id, "\n".join(lines)))
-    title = f"Research digest: {cfg.topic.name}, {date} (run {run_id})"
-    return DigestContent(run_id, title, body, comments)
+    title = f"Research digest: {topic.name}, {date} (run {run_id})"
+    return DigestContent(run_id, title, body, comments, topic.slug)
 
 
 def preview(content: DigestContent) -> str:
     """What --dry-run prints instead of calling GitHub."""
     bar = "=" * 100
-    parts = [bar, f"ISSUE  {content.title}   [label: {LABEL}]", bar, content.body]
+    parts = [bar, f"ISSUE  {content.title}   [labels: {', '.join(content.labels)}]", bar, content.body]
     for i, (_, body) in enumerate(content.comments, 1):
         parts += ["", f"--- comment {i}/{len(content.comments)} " + "-" * 80, body]
     return "\n".join(parts)
@@ -165,7 +185,10 @@ class Deliverer:
                 return issue["number"], True
 
         self.gh.ensure_label(LABEL, description="Weekly research digest")
-        issue = self.gh.create_issue(content.title, content.body, [LABEL])
+        if content.topic:
+            self.gh.ensure_label(topic_label(content.topic), color="1d76db",
+                                 description=f"Digest topic: {content.topic}")
+        issue = self.gh.create_issue(content.title, content.body, content.labels)
         self.db.save_digest_issue(content.run_id, issue["number"], issue.get("html_url", ""))  # save at once
         result.issue_url = issue.get("html_url", "")
         log.info("Opened issue #%d: %s", issue["number"], content.title)

@@ -143,7 +143,7 @@ def test_auth_error_stops_remaining_papers(db):
     out = summarizer(db, llm, http).summarize_all([make_paper("a"), make_paper("b"), make_paper("c")])
     assert llm.calls == 1 and len(http.urls) == 1  # no further downloads or calls
     assert [ps.summary for ps in out] == [None, None, None]
-    assert out[2].error == "LLM auth failed"
+    assert out[2].error == "LLM unavailable"
 
 
 def test_pdf_text_is_escaped_in_the_prompt(db):

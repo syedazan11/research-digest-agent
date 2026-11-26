@@ -154,3 +154,11 @@ def test_fetcher_uses_export_arxiv_and_throttles():
 
 def test_user_agent_identifies_the_project():
     assert USER_AGENT == "research-digest-agent/0.1 (+https://github.com/syedazan11/research-digest-agent)"
+
+
+def test_a_paper_picked_by_two_topics_is_downloaded_once():
+    http_calls = []
+    fetcher = PdfFetcher(get=lambda url: http_calls.append(url) or make_pdf(STANDARD), throttle=Throttle(0))
+    first = get_paper_text(paper(), fetcher)
+    second = get_paper_text(paper(), fetcher)  # same run, another topic
+    assert first is second and len(http_calls) == 1 and fetcher.downloads == 1

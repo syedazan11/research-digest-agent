@@ -84,6 +84,7 @@ class PdfFetcher:
         self.throttle = throttle or Throttle(delay_seconds)
         self.timeout = timeout
         self.downloads = 0
+        self.text_cache: dict[str, PaperText] = {}  # paper id -> extracted text, shared across topics
         self._client = None
 
     def _http_get(self, url: str) -> bytes:
@@ -237,7 +238,15 @@ def build_text(paper: Paper, data: bytes, max_tokens: int = 3000) -> PaperText:
 
 
 def get_paper_text(paper: Paper, fetcher: PdfFetcher, max_tokens: int = 3000) -> PaperText:
-    """Download + extract, never raising: any failure gives the abstract with a reason, logged."""
+    """Download + extract, never raising: any failure gives the abstract with a reason, logged.
+    Cached on the fetcher, so a paper selected by two topics in one run is downloaded once."""
+    key = f"{paper.id}:{max_tokens}"
+    if key not in fetcher.text_cache:
+        fetcher.text_cache[key] = _get_paper_text(paper, fetcher, max_tokens)
+    return fetcher.text_cache[key]
+
+
+def _get_paper_text(paper: Paper, fetcher: PdfFetcher, max_tokens: int) -> PaperText:
     if not paper.pdf_url:  # e.g. sample/offline papers: don't hit the network at all
         result = abstract_only(paper, DOWNLOAD_FAILED)
         log.warning("No PDF link for %s (%s): using the abstract", paper.id, DOWNLOAD_FAILED)
