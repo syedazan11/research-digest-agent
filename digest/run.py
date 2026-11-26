@@ -409,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
 
     cfg = load_config(args.config)
+    if cfg.project_url:
+        os.environ["DIGEST_PROJECT_URL"] = cfg.project_url  # User-Agent for arXiv and GitHub (identity.py)
     topics = [cfg.get_topic(args.topic)] if args.topic else cfg.topics
     log.info("Topics: %s", ", ".join(t.slug for t in topics))
     timer = StageTimer()

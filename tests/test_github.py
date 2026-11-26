@@ -35,7 +35,7 @@ def test_headers_and_basic_calls():
     comment = c.create_comment(issue["number"], "hello")
     assert c.list_comments(issue["number"])[0]["id"] == comment["id"]
     assert seen["authorization"] == f"Bearer {TOKEN}"
-    assert seen["user-agent"] == USER_AGENT and seen["x-github-api-version"] == "2022-11-28"
+    assert seen["user-agent"].startswith("research-digest-agent/") and seen["x-github-api-version"] == "2022-11-28"
 
 
 def test_label_already_existing_is_fine():

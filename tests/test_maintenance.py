@@ -22,7 +22,7 @@ def test_commit_message(tmp_path, papers):
         db.save_digest_issue(run, 7, "url")
         db.upsert_feedback(papers[0].id, 1, 123, "2026-11-25T00:00:00Z")
 
-    assert commit_message(path, since_run=before) == f"digest: run {run} (5 papers, issue #7)"
+    assert commit_message(path, since_run=before) == f"digest: test-topic run {run} (5 papers, issue #7)"
     assert commit_message(path, since_run=run) == "digest: feedback only (1 ratings)"
 
 
@@ -30,7 +30,7 @@ def test_commit_message_without_issue(tmp_path):
     path = tmp_path / "d.db"
     with Database(path, default_topic="test-topic") as db:
         db.log_run(0, 0, 0, ["bm25"])
-    assert commit_message(path, since_run=0) == "digest: run 1 (0 papers)"
+    assert commit_message(path, since_run=0) == "digest: test-topic run 1 (0 papers)"
 
 
 def test_vacuum_shrinks_after_deletes(tmp_path):
@@ -54,4 +54,19 @@ def test_cli(tmp_path, capsys):
     assert main(["--config", str(cfg), "commit-message", "--since", "0"]) == 0
     assert main(["--config", str(cfg), "vacuum"]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "1" and out[1] == "digest: run 1 (0 papers)" and out[2].startswith("VACUUM d.db")
+    assert out[0] == "1" and out[1] == "digest: test-topic run 1 (0 papers)" and out[2].startswith("VACUUM d.db")
+
+
+
+def test_commit_message_lists_every_topics_run(tmp_path, papers):
+    path = tmp_path / "d.db"
+    with Database(path, default_topic="llm-evaluation") as db:
+        before = db.log_run(1, 1, 1, ["bm25"])
+        for topic, issue in (("llm-evaluation", 9), ("ai-agents", 10)):
+            db.save_papers(papers[:5], topic)
+            run = db.log_run(10, 10, 10, ["bm25"], topic=topic)
+            db.save_rankings(run, [{"paper_id": p.id, "hybrid_rank": i, "hybrid_score": 0.5, "final_rank": i}
+                                   for i, p in enumerate(papers[:5], 1)])
+            db.save_digest_issue(run, issue)
+    assert commit_message(path, since_run=before) == (
+        "digest: llm-evaluation run 2 (5 papers, issue #9); ai-agents run 3 (5 papers, issue #10)")

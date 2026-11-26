@@ -234,3 +234,20 @@ def test_repeated_summary_and_wins(papers):
     text = ev.render_repeated(rep)
     assert "## Main result: 4 repeated 2-fold splits" in text and "| BM25 + LLM rerank v1 |" in text
     assert "| *Random order (expected)* | 0.40 |" in text and "**Best rerank prompt by mean NDCG@10: v2.**" in text
+
+
+def test_eval_reads_only_the_chosen_topics_labels(tmp_path, papers):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("topics:\n  - name: A\n    keywords: [k]\n  - name: B\n    keywords: [k]\n"
+                   "database:\n  path: data/digest.db\n  labels_path: data/labels.db\n", encoding="utf-8")
+    data = make_data(papers)
+    with LabelStore(tmp_path / "data" / "labels.db", default_topic="a") as s:
+        s.add_to_pool(data.papers, topic="b")
+        for pid, r in data.relevant.items():
+            s.set_label(pid, bool(r), topic="b")
+    from digest.config import load_config
+    assert len(ev.load_dataset(load_config(cfg), "a").papers) == 0
+    assert len(ev.load_dataset(load_config(cfg), "b").papers) == 30
+    out = tmp_path / "r.md"
+    assert ev.main(["--config", str(cfg), "--topic", "b", "--no-llm", "--repeats", "2", "--out", str(out)]) == 0
+    assert ev.main(["--config", str(cfg), "--topic", "a", "--no-llm"]) == 1  # a has no labels

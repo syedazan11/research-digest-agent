@@ -239,3 +239,23 @@ def test_a_topic_removed_from_config_still_delivers(db, cfg, papers):
     gh = FakeGitHub()
     assert deliver_run(db, cfg, rid, gh.client(), sleep=lambda s: None).complete
     assert gh.issues[1]["title"].startswith("Research digest: retired-topic")
+
+
+def test_deliver_cli_finishes_every_topics_pending_run(tmp_path, papers, monkeypatch):
+    import digest.deliver as dl
+    from digest.db import Database
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text((ROOT / "config.yaml").read_text(encoding="utf-8").replace(
+        "path: data/digest.db", f"path: {(tmp_path / 'digest.db').as_posix()}"), encoding="utf-8")
+    c = load_config(cfg_path)
+    with Database.for_config(c) as db:
+        seed(db, c, papers, topic="llm-evaluation")
+        seed(db, c, papers, topic="ai-agents")
+    gh = FakeGitHub()
+    monkeypatch.setattr("digest.github.make_github", lambda: gh.client())
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)
+    assert dl.main(["--config", str(cfg_path)]) == 0
+    assert sorted(i["title"].split(",")[0] for i in gh.issues.values()) == [
+        "Research digest: AI agents", "Research digest: LLM evaluation"]
+    assert dl.main(["--config", str(cfg_path)]) == 0 and len(gh.issues) == 2  # nothing left to deliver

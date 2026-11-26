@@ -35,20 +35,26 @@ def vacuum(db_path: Path) -> tuple[int, int]:
 
 
 def commit_message(db_path: Path, since_run: int) -> str:
-    """What the bot's commit says: the run(s) logged since `since_run`, or that only feedback changed."""
+    """What the bot's commit says: every topic's run logged since `since_run`, e.g.
+    "digest: llm-evaluation run 8 (5 papers, issue #9); ai-agents run 9 (5 papers, issue #10)",
+    or that only feedback changed."""
     with sqlite3.connect(db_path) as conn:
-        runs = conn.execute("SELECT id FROM runs WHERE id > ? ORDER BY id", (since_run,)).fetchall()
+        has_topic = "topic" in {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+        runs = conn.execute(f"SELECT id, {'topic' if has_topic else 'NULL'} FROM runs WHERE id > ? ORDER BY id",
+                            (since_run,)).fetchall()
         if not runs:
             n = conn.execute("SELECT COUNT(*) FROM feedback WHERE source = 'github'").fetchone()[0]
             return f"digest: feedback only ({n} ratings)"
-        run_id = runs[-1][0]
-        n_papers = conn.execute("SELECT COUNT(*) FROM rankings WHERE run_id = ? AND selected = 1",
-                                (run_id,)).fetchone()[0]
-        issue = conn.execute("SELECT issue_number FROM digest_issues WHERE run_id = ?", (run_id,)).fetchone()
-    parts = [f"{n_papers} paper{'s' if n_papers != 1 else ''}"]
-    if issue is not None:
-        parts.append(f"issue #{issue[0]}")
-    return f"digest: run {run_id} ({', '.join(parts)})"
+        entries = []
+        for run_id, topic in runs:
+            n_papers = conn.execute("SELECT COUNT(*) FROM rankings WHERE run_id = ? AND selected = 1",
+                                    (run_id,)).fetchone()[0]
+            issue = conn.execute("SELECT issue_number FROM digest_issues WHERE run_id = ?", (run_id,)).fetchone()
+            parts = [f"{n_papers} paper{'s' if n_papers != 1 else ''}"]
+            if issue is not None:
+                parts.append(f"issue #{issue[0]}")
+            entries.append(f"{topic + ' ' if topic else ''}run {run_id} ({', '.join(parts)})")
+    return "digest: " + "; ".join(entries)
 
 
 def main(argv: list[str] | None = None) -> int:

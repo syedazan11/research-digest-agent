@@ -118,10 +118,10 @@ def label_examples(papers: Sequence[Paper], relevant: dict[str, int]) -> list[Ex
 
 # --- LLM scores (cached per paper, model and prompt version) ---
 def llm_scores_for(version: str, papers: Sequence[Paper], store: LabelStore, model_key: str, topic: str,
-                   llm: LLMClient | None, batch_size: int = 5) -> dict[str, float]:
+                   llm: LLMClient | None, batch_size: int = 5, topic_slug: str | None = None) -> dict[str, float]:
     """Raw scores on the prompt's own scale. Missing ones are fetched in a fixed order, if llm is given."""
     prompt = PROMPTS[version]
-    cached = {pid: s for pid, (s, _) in store.get_llm_scores(model_key, version).items()}
+    cached = {pid: s for pid, (s, _) in store.get_llm_scores(model_key, version, topic_slug).items()}
     todo = sorted((p for p in papers if p.id not in cached), key=lambda p: shuffle_key(p.id))
     if todo and llm is None:
         log.warning("%s: %d papers have no cached score and no LLM is available", version, len(todo))
@@ -138,7 +138,7 @@ def llm_scores_for(version: str, papers: Sequence[Paper], store: LabelStore, mod
                 log.warning("%s: batch failed (%s); those papers stay unscored", version, e)
                 continue
             for idx, item in items.items():
-                store.put_llm_score(batch[idx].id, model_key, version, item.score, item.reason)
+                store.put_llm_score(batch[idx].id, model_key, version, item.score, item.reason, topic=topic_slug)
                 cached[batch[idx].id] = item.score
     return {p.id: cached[p.id] for p in papers if p.id in cached}
 
@@ -385,17 +385,18 @@ def render_report(r: EvalResult, model_key: str, today: str) -> str:
 
 
 # --- CLI ---
-def load_dataset(cfg: Config) -> Dataset:
+def load_dataset(cfg: Config, topic: str | None = None) -> Dataset:
+    slug = topic or cfg.topic.slug
     from digest.db import Database
 
     with LabelStore.for_config(cfg, read_only=True) as store:
-        labelled = store.labelled_papers()
-        rounds = store.conn.execute("SELECT MAX(round) FROM labels_archive").fetchone()[0]
-        previous = store.archived_labels(rounds) if rounds else {}
+        labelled = store.labelled_papers(slug)
+        rounds = store.latest_round(slug)
+        previous = store.archived_labels(rounds, slug) if rounds else {}
     reactions = []
     if cfg.db_path.exists():
         with Database.for_config(cfg, in_memory_copy=True) as db:  # never writes digest.db
-            for row in db.conn.execute("SELECT paper_id, rating FROM feedback WHERE source = 'github'"):
+            for row in db.feedback_rows(slug):  # this topic's reactions only
                 paper = db.get_paper(row["paper_id"])
                 if paper is not None:
                     reactions.append(Example(paper, int(row["rating"]), "reaction"))
@@ -407,6 +408,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int
 
     ap = argparse.ArgumentParser(description="Evaluate ranking methods on your hand labels")
     ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--topic", help="topic slug from config.yaml (default: the first topic)")
     ap.add_argument("--versions", nargs="*", default=list(PROMPTS), help="rerank prompt versions to compare")
     ap.add_argument("--no-llm", action="store_true", help="never call the LLM (cached scores are still used)")
     ap.add_argument("--out", help="report path (default data/evals/<date>.md)")
@@ -421,15 +423,16 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int
             stream.reconfigure(errors="replace")
     load_dotenv()
     cfg = load_config(args.config)
+    tcfg = cfg.get_topic(args.topic) if args.topic else cfg.topic
 
-    data = load_dataset(cfg)
+    data = load_dataset(cfg, tcfg.slug)
     if len(data.papers) < 10 or data.n_relevant == 0 or data.n_relevant == len(data.papers):
         log.error("Need at least 10 labelled papers with both classes (have %d, %d relevant). "
                   "Run python -m digest.label first.", len(data.papers), data.n_relevant)
         return 1
 
     model_key = f"{cfg.rerank.provider}/{cfg.rerank.model}"
-    topic = f"{cfg.topic.name}. {cfg.topic.description}"
+    topic = f"{tcfg.name}. {tcfg.description}"
     llm = None
     if not args.no_llm:
         if make_llm is None:
@@ -438,7 +441,7 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int
     scores: dict[str, dict[str, float]] = {}
     with LabelStore.for_config(cfg) as store:
         for version in args.versions:
-            got = llm_scores_for(version, data.papers, store, model_key, topic, llm)
+            got = llm_scores_for(version, data.papers, store, model_key, topic, llm, topic_slug=tcfg.slug)
             if len(got) < len(data.papers) * 0.9:
                 log.warning("%s: only %d/%d papers scored, left out of the comparison", version, len(got),
                             len(data.papers))
@@ -447,14 +450,14 @@ def main(argv: list[str] | None = None, make_llm: Callable | None = None) -> int
     if llm is not None:
         log.info("LLM calls this eval: %d", llm.calls)
 
-    query = cfg.topic.ranking_query()
+    query = tcfg.ranking_query()
     rep = run_repeated(data, query, scores, repeats=max(1, args.repeats))
     result = rep.results[0]  # the canonical split: per-half details and score distributions
     today = f"{datetime.now(timezone.utc):%Y-%m-%d}"
     canonical = render_report(result, model_key, today).split("\n", 2)
     report = "\n".join([canonical[0], canonical[1], render_repeated(rep),
                         "## Details: the canonical split", "", canonical[2]])
-    out = Path(args.out) if args.out else cfg.db_path.parent / "evals" / f"{today}.md"
+    out = Path(args.out) if args.out else cfg.db_path.parent / "evals" / f"{today}_{tcfg.slug}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")
     print(report)

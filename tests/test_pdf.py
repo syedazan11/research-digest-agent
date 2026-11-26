@@ -153,7 +153,7 @@ def test_fetcher_uses_export_arxiv_and_throttles():
 
 
 def test_user_agent_identifies_the_project():
-    assert USER_AGENT == "research-digest-agent/0.1 (+https://github.com/syedazan11/research-digest-agent)"
+    assert USER_AGENT.startswith("research-digest-agent/") and "(+https://" in USER_AGENT
 
 
 def test_a_paper_picked_by_two_topics_is_downloaded_once():
@@ -162,3 +162,16 @@ def test_a_paper_picked_by_two_topics_is_downloaded_once():
     first = get_paper_text(paper(), fetcher)
     second = get_paper_text(paper(), fetcher)  # same run, another topic
     assert first is second and len(http_calls) == 1 and fetcher.downloads == 1
+
+
+
+def test_user_agent_never_claims_to_be_another_copy(monkeypatch):
+    from digest.identity import SOFTWARE_URL, user_agent
+
+    monkeypatch.delenv("DIGEST_PROJECT_URL", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    assert user_agent().endswith(f"(+{SOFTWARE_URL})")  # local, no config: the software's homepage
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someone/their-digest")  # a template copy in Actions
+    assert user_agent().endswith("(+https://github.com/someone/their-digest)")
+    monkeypatch.setenv("DIGEST_PROJECT_URL", "https://example.org/me")  # config.yaml project.url wins
+    assert user_agent().endswith("(+https://example.org/me)")

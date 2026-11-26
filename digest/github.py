@@ -19,10 +19,12 @@ from typing import Callable
 
 import httpx
 
+from digest.identity import user_agent
+
 log = logging.getLogger(__name__)
 
 API = "https://api.github.com"
-USER_AGENT = "research-digest-agent/0.1 (+https://github.com/syedazan11/research-digest-agent)"
+USER_AGENT = user_agent()  # evaluated at import; clients call user_agent() again so env changes apply
 PLACEHOLDER_TOKEN = "your-token-here"
 SECONDARY_LIMIT_WAIT = 60.0  # GitHub's docs: with no retry-after, wait at least a minute
 MAX_WAIT_SECONDS = 120.0  # never sleep longer than this on one rate limit; fail clearly instead
@@ -75,7 +77,7 @@ class GitHubClient:
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": USER_AGENT,
+                "User-Agent": user_agent(),
             },
         )
 

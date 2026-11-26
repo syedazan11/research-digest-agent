@@ -277,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(description="Deliver (or resume) a run's digest as a GitHub issue")
     ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--topic", help="only this topic's newest undelivered run (default: every topic)")
     ap.add_argument("--run", type=int, help="run id (default: newest run not fully delivered)")
     ap.add_argument("--dry-run", action="store_true", help="print the issue, don't post")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -291,22 +292,30 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
 
     with Database.for_config(cfg, in_memory_copy=args.dry_run) as db:
-        run_id = args.run or db.latest_undelivered_run()
-        if run_id is None:
+        if args.run:
+            run_ids = [args.run]
+        else:  # the newest undelivered run of each topic (or of one topic)
+            slugs = [cfg.get_topic(args.topic).slug] if args.topic else [t.slug for t in cfg.topics]
+            run_ids = [r for r in (db.latest_undelivered_run(s) for s in slugs) if r is not None]
+        if not run_ids:
             log.info("Nothing to deliver: every run with selected papers is already delivered")
             return 0
         if args.dry_run:
-            print(preview(build_content(db, cfg, run_id)))
+            for run_id in run_ids:
+                print(preview(build_content(db, cfg, run_id)))
             return 0
         gh = make_github()
         if gh is None:
             return 1
+        errors = 0
         try:
-            result = deliver_run(db, cfg, run_id, gh)
+            for run_id in run_ids:
+                result = deliver_run(db, cfg, run_id, gh)
+                log_result(result)
+                errors += bool(result.error)
         finally:
             gh.close()
-        log_result(result)
-        return 1 if result.error else 0
+        return 1 if errors else 0
 
 
 if __name__ == "__main__":

@@ -16,12 +16,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from digest.identity import user_agent
 from digest.models import Paper
 
 log = logging.getLogger(__name__)
 
 PDF_URL = "https://export.arxiv.org/pdf/{id}"  # export.* is arXiv's mirror for programmatic access
-USER_AGENT = "research-digest-agent/0.1 (+https://github.com/syedazan11/research-digest-agent)"
+USER_AGENT = user_agent()  # see digest/identity.py: never claims to be another copy
 MAX_PDF_BYTES = 25 * 1024 * 1024
 CHARS_PER_TOKEN = 4  # rough average for English; good enough for a budget, no tokenizer needed
 MIN_TEXT_CHARS = 500  # less than this from a whole PDF = scanned images, not text
@@ -91,7 +92,7 @@ class PdfFetcher:
         import httpx
 
         if self._client is None:
-            self._client = httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=self.timeout,
+            self._client = httpx.Client(headers={"User-Agent": user_agent()}, timeout=self.timeout,
                                         follow_redirects=True)
         with self._client.stream("GET", url) as resp:
             resp.raise_for_status()
