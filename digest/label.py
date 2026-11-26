@@ -128,8 +128,12 @@ def main(argv: list[str] | None = None) -> int:
 
     with LabelStore(cfg.labels_path) as store:
         if args.relabel:
-            rnd, n = store.archive_labels()
-            print(f"Archived {n} labels as round {rnd} (labels_archive). The pool and cached LLM scores are kept.")
+            if not store.labels():
+                print("Nothing to archive: there are no current labels (an earlier --relabel already moved them).")
+            else:
+                rnd, n = store.archive_labels()
+                print(f"Archived {n} labels as round {rnd} (labels_archive). "
+                      "The pool and cached LLM scores are kept.")
         if args.fetch:
             papers = fetch_recent(cfg.topic.keywords, cfg.topic.categories, args.days, args.max)
             added = store.add_to_pool(papers)

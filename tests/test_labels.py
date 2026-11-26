@@ -136,3 +136,9 @@ def test_cli_relabel(tmp_path, papers, capsys):
     assert main(["--config", str(cfg), "--relabel", "--stats"]) == 0
     out = capsys.readouterr().out
     assert "Archived 1 labels as round 1" in out and "Pool 10: 0 relevant, 0 not relevant, 10 unlabelled" in out
+
+    assert main(["--config", str(cfg), "--relabel", "--stats"]) == 0  # again, with nothing labelled
+    assert "Nothing to archive" in capsys.readouterr().out
+    with LabelStore(tmp_path / "labels.db") as s:
+        rounds = s.conn.execute("SELECT DISTINCT round FROM labels_archive").fetchall()
+    assert [r[0] for r in rounds] == [1]  # no empty round 2
