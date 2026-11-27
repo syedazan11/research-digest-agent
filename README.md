@@ -3,21 +3,25 @@
 [![Weekly digest](https://github.com/syedazan11/research-digest-agent/actions/workflows/weekly-digest.yml/badge.svg)](https://github.com/syedazan11/research-digest-agent/actions/workflows/weekly-digest.yml)
 [![Tests](https://github.com/syedazan11/research-digest-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/syedazan11/research-digest-agent/actions/workflows/tests.yml)
 
-An agent that tracks new arXiv papers on the topics you choose, ranks them with hybrid retrieval and LLM reranking, and posts a weekly digest per topic as a GitHub issue. It learns from your 👍/👎 reactions. Make your own copy in 5 minutes (below).
+A weekly, multi-topic arXiv research digest that fetches papers, deduplicates per topic, ranks with BM25 and Rocchio feedback, reranks with a swappable LLM provider, summarizes PDF sections, and publishes one GitHub issue per topic. GitHub Actions runs the pipeline weekly, and issue reactions feed the next ranking cycle.
 
-> **Status: Day 7.** The full pipeline runs unattended every Monday on GitHub Actions, for several topics at once (currently *LLM evaluation* and *AI agents*): fetch → per-topic dedup → hybrid ranking (BM25 + feedback learning) → LLM rerank → PDF summaries → one GitHub issue per topic → 👍/👎 feedback, measured on a hand-labelled eval set (see Results). The repo is usable as a template. See [GUIDE.md](GUIDE.md).
+## Architecture
 
-## Pipeline
-
+```text
+Weekly GitHub Actions (for each configured topic)
+arXiv fetch → topic-scoped dedup → BM25 + Rocchio feedback → LLM rerank
+           → PDF section summaries → GitHub issue
+                 ↑                                      │
+                 └──────────── 👍/👎 reactions ─────────┘
 ```
-GitHub Actions, Mondays 09:15 PKT:
-  python -m digest.feedback → owner's 👍/👎 reactions from last week → SQLite (tagged by topic)
-  python -m digest.run, for each topic in config.yaml (one failing topic doesn't stop the others):
-    arXiv fetch → per-topic dedup → Hybrid ranking (BM25 + this topic's feedback) → top 20
-      → LLM rerank (Groq gpt-oss-120b) → top N → PyMuPDF summaries
-      → GitHub issue labelled topic:<slug> (1 comment per paper) + Markdown digest
-  commit data/digest.db back to the repo
-```
+
+## Results
+
+On the 108-paper LLM-evaluation dataset, mean NDCG@10 across 20 repeated stratified two-fold splits was **0.43 random baseline → 0.57 with LLM reranking → 0.60 with feedback plus LLM reranking**. Labels are single-rater; agreement between rounds was low (**Cohen’s κ = 0.16**).
+
+## Limitations
+
+The evaluation covers one topic and a small, single-rater label set; the repeated splits overlap, and these labels now also train production feedback, so they are not a clean held-out test set. Recall is measured only within the keyword-selected candidate pool, so missed papers are not evaluated.
 
 ## Quickstart
 
@@ -75,7 +79,7 @@ Keyword tip: a single broad word can flood a topic. Watch the run log for `Fetch
 
 At ~140 KB plus a few KB a week, committing to `main` stays cheap for years. If it ever grows past a few MB, a `data` branch is the next step.
 
-## Known limitations
+## Operational limitations
 
 - **GitHub may silently stop the weekly schedule.** In a public repo, GitHub disables scheduled workflows after [60 days with no repository activity](https://docs.github.com/en/actions/using-workflows/disabling-and-enabling-a-workflow). The bot's own weekly commits most likely don't count: the [gh-action-keepalive](https://github.com/efrecon/gh-action-keepalive) project tried exactly that and reports it didn't work. Workflow runs don't count either. So after two months without a human push, the digest stops arriving. **What to do:** the missing Monday issue is the alarm. Re-enable the workflow in **Actions → Weekly digest → Enable workflow**, or push any commit. A keepalive step using a second token is possible but not set up.
 - **Groq's free tier caps the number of topics.** 1000 requests/day and, the real limit, 8000 tokens/minute. Two topics take ~30 calls and ~4 minutes (mostly waiting for the per-minute token window); `llm.max_calls_per_run` (60) stops a bad week from burning the day's quota.
@@ -83,7 +87,7 @@ At ~140 KB plus a few KB a week, committing to `main` stays cheap for years. If 
 - **arXiv from cloud runners.** arXiv can be slow or rate-limit requests from cloud IPs. A paper whose PDF can't be fetched is summarized from its abstract, and the digest says so.
 - **Rerank scores bunch up.** With prompt v1, top papers often share a 9/10 and BM25 breaks the ties. Day 6 tested stricter prompts: they spread the scores out but didn't rank better, so v1 stays (see Results).
 
-## Results
+## Evaluation details
 
 Ranking evaluation for the **LLM evaluation** topic, 2026-11-26 ([full report](data/evals/2026-11-26.md), `python -m digest.eval --topic llm-evaluation`). The *AI agents* topic has no labels yet.
 

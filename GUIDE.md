@@ -122,7 +122,7 @@ git push
 
 ### Day 1 checklist
 
-- [ ] `python -m pytest` → 15 passed
+- [ ] `python -m pytest` → 285 passed
 - [ ] Offline sample run works; you can explain why paper #4 scores low
 - [ ] `config.yaml` set to YOUR topic
 - [ ] Real run prints ranked papers with both `bm25` and `embedding` scores
